@@ -4,6 +4,9 @@
 //
 //  Unified event types for the session state machine.
 //  All state changes flow through SessionStore.process(event).
+//  LEGACY FROZEN (Phase 0): keep this as the production baseline while the
+//  canonical event bus is introduced. Do not add new shared semantics here;
+//  new runtime semantics must land in adapter/bus/projection layers instead.
 //
 
 import Foundation
@@ -142,6 +145,9 @@ struct ToolCompletionResult: Sendable {
 // MARK: - Hook Event Extensions
 
 extension HookEvent {
+    // LEGACY frozen hook-side semantic helper. Phase 0 preserves current
+    // behavior but forbids growing shared semantics here.
+
     /// Determine the target session phase based on this hook event
     nonisolated func determinePhase() -> SessionPhase {
         // PreCompact takes priority

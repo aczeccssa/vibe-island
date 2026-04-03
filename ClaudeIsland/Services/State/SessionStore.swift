@@ -4,6 +4,9 @@
 //
 //  Central state manager for all Claude sessions.
 //  Single source of truth - all state mutations flow through process().
+//  LEGACY FROZEN (Phase 0): this remains the production semantic choke point
+//  until the canonical bus/projection path is ready. Do not add new shared
+//  semantics here beyond behavior-preserving fixes.
 //
 
 import Combine
@@ -70,6 +73,8 @@ actor SessionStore {
 
     // MARK: - Event Processing
 
+    // LEGACY frozen semantic choke point. New runtime semantics belong in the
+    // future adapter/bus/projection architecture, not in this shared reducer.
     /// Process any session event - the ONLY way to mutate state
     func process(_ event: SessionEvent) async {
         Self.logger.debug("Processing: \(String(describing: event), privacy: .public)")
@@ -219,7 +224,8 @@ actor SessionStore {
         syncLiveInteractionHistory(for: &session)
 
         sessions[sessionId] = session
-        publishState()
+        // The outer process() publish emits parity/shadow diagnostics once.
+        publishState(includeDiagnostics: false)
 
         if event.shouldSyncFile {
             scheduleFileSync(sessionId: sessionId, cwd: event.cwd, agentId: event.agentId)
@@ -286,7 +292,8 @@ actor SessionStore {
         syncLiveInteractionHistory(for: &session)
 
         sessions[sessionId] = session
-        publishState()
+        // The outer process() publish emits parity/shadow diagnostics once.
+        publishState(includeDiagnostics: false)
 
         // Update primary agent
         Task { @MainActor in
@@ -687,7 +694,8 @@ actor SessionStore {
 
     private func processProcessSessionEnded(sessionId: String) {
         sessions.removeValue(forKey: sessionId)
-        publishState()
+        // The outer process() publish emits parity/shadow diagnostics once.
+        publishState(includeDiagnostics: false)
     }
 
     private func processToolTracking(event: HookEvent, session: inout SessionState) {
@@ -1655,8 +1663,12 @@ actor SessionStore {
 
     // MARK: - State Publishing
 
-    private func publishState() {
+    private func publishState(includeDiagnostics: Bool = true) {
         let sortedSessions = Array(sessions.values).sorted { $0.projectName < $1.projectName }
+        if includeDiagnostics {
+            ParityLogger.logLegacySnapshot(sessions: sortedSessions)
+            ShadowDiffLogger.logDiffIfAvailable(legacySessions: sortedSessions)
+        }
         sessionsSubject.send(sortedSessions)
     }
 

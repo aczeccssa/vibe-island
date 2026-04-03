@@ -3,6 +3,8 @@
 //  ClaudeIsland
 //
 //  Shared normalization for Codex and Gemini tool calls/results.
+//  LEGACY FROZEN (Phase 0): preserve current shared normalization behavior, but
+//  do not grow new cross-runtime semantics here.
 //
 
 import Foundation
