@@ -10,17 +10,6 @@
 import Foundation
 import os.log
 
-struct SessionProjectionShadowSnapshot: Codable, Equatable, Sendable {
-    let sessionCount: Int
-    let sessionIDs: [String]
-    let attentionSessionIDs: [String]
-    let activeApprovalToolUseIDs: [String: String]
-    let activeChoiceIDs: [String: String]
-    let pendingInteractionCounts: [String: Int]
-    let chatItemCounts: [String: Int]
-    let inProgressToolCounts: [String: Int]
-}
-
 struct SessionShadowDiff: Codable, Equatable, Sendable {
     let sessionCountMismatch: [Int]
     let sessionIDsMismatch: [[String]]
@@ -46,9 +35,9 @@ struct SessionShadowDiff: Codable, Equatable, Sendable {
 enum ShadowDiffLogger {
     private static let logger = Logger(subsystem: "com.claudeisland", category: "EventBusShadow")
     private static let lock = NSLock()
-    private static var projectedSnapshot: SessionProjectionShadowSnapshot?
+    private static var projectedSnapshot: LegacySessionParitySnapshot?
 
-    static func updateProjectedSnapshot(_ snapshot: SessionProjectionShadowSnapshot?) {
+    static func updateProjectedSnapshot(_ snapshot: LegacySessionParitySnapshot?) {
         lock.lock()
         projectedSnapshot = snapshot
         lock.unlock()
@@ -81,7 +70,7 @@ enum ShadowDiffLogger {
         logger.warning("shadow_diff \(payload, privacy: .public)")
     }
 
-    private static func currentProjectedSnapshot() -> SessionProjectionShadowSnapshot? {
+    private static func currentProjectedSnapshot() -> LegacySessionParitySnapshot? {
         lock.lock()
         defer { lock.unlock() }
         return projectedSnapshot

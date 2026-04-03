@@ -80,8 +80,7 @@ actor ProcessBasedAgentDetector {
                         pid: $0.pid,
                         cwd: $0.cwd,
                         sessionId: $0.sessionId,
-                        runtimeIdentity: RuntimeIdentity.fromLegacyAgentID("gemini")
-                            ?? RuntimeIdentity(adapterID: .geminiCLI, familyID: .gemini, modeHint: .cli)
+                        runtimeIdentity: RuntimeIdentity.fromLegacyAgentID("gemini")!
                     )
                 }
             )
