@@ -4,6 +4,8 @@
 //
 //  Unix domain socket server for real-time hook events
 //  Supports request/response for permission decisions
+//  LEGACY FROZEN (Phase 0): keep current hook semantics stable while the
+//  canonical adapter/bus architecture is introduced.
 //
 
 import Foundation
@@ -79,6 +81,8 @@ struct HookEvent: Codable, Sendable {
         rawPayload = try container.decodeIfPresent([String: AnyCodable].self, forKey: .rawPayload)
     }
 
+    // LEGACY frozen hook-side semantic helper. Phase 0 preserves behavior but
+    // forbids adding new shared semantic branches here.
     var sessionPhase: SessionPhase {
         if event == "PreCompact" {
             return .compacting
@@ -110,6 +114,7 @@ struct HookEvent: Codable, Sendable {
     }
 
     /// Whether this event expects a response (permission request)
+    // LEGACY frozen hook-side semantic helper.
     nonisolated var expectsResponse: Bool {
         if event == "PermissionRequest" {
             return true
@@ -130,6 +135,7 @@ struct HookEvent: Codable, Sendable {
         return false
     }
 
+    // LEGACY frozen hook-side semantic helper.
     nonisolated var responseKind: HookResponseKind {
         if event == "PermissionRequest" {
             return .permission
@@ -156,6 +162,10 @@ struct HookEvent: Codable, Sendable {
 
     nonisolated var expectsInteractionResponse: Bool {
         responseKind == .interaction
+    }
+
+    var legacyRuntimeIdentity: RuntimeIdentity? {
+        RuntimeIdentity.fromLegacyAgentID(agentId)
     }
 }
 

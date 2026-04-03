@@ -4,6 +4,8 @@
 //
 //  Explicit state machine for Claude session lifecycle.
 //  All state transitions are validated before being applied.
+//  LEGACY FROZEN (Phase 0): preserve this state machine as the production
+//  baseline. Do not add new shared semantic growth here.
 //
 
 import Foundation

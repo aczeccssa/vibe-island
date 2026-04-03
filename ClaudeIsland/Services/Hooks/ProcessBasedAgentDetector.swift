@@ -56,12 +56,18 @@ actor ProcessBasedAgentDetector {
         let currentSessions = await SessionStore.shared.allSessions()
         let currentSessionsById = Dictionary(uniqueKeysWithValues: currentSessions.map { ($0.sessionId, $0) })
 
-        var detectedSessions: [(agentId: String, pid: Int, cwd: String, sessionId: String)] = []
+        var detectedSessions: [(agentId: String, pid: Int, cwd: String, sessionId: String, runtimeIdentity: RuntimeIdentity)] = []
 
         if AppSettings.isAgentEnabled("codex") {
             detectedSessions.append(
                 contentsOf: CodexAgent().detectRunningSessions().map {
-                    (agentId: "codex", pid: $0.pid, cwd: $0.cwd, sessionId: $0.sessionId)
+                    (
+                        agentId: "codex",
+                        pid: $0.pid,
+                        cwd: $0.cwd,
+                        sessionId: $0.sessionId,
+                        runtimeIdentity: $0.variant.runtimeIdentity
+                    )
                 }
             )
         }
@@ -69,7 +75,13 @@ actor ProcessBasedAgentDetector {
         if AppSettings.isAgentEnabled("gemini") {
             detectedSessions.append(
                 contentsOf: GeminiCLIAgent().detectRunningSessions().map {
-                    (agentId: "gemini", pid: $0.pid, cwd: $0.cwd, sessionId: $0.sessionId)
+                    (
+                        agentId: "gemini",
+                        pid: $0.pid,
+                        cwd: $0.cwd,
+                        sessionId: $0.sessionId,
+                        runtimeIdentity: RuntimeIdentity.fromLegacyAgentID("gemini")!
+                    )
                 }
             )
         }
@@ -84,7 +96,7 @@ actor ProcessBasedAgentDetector {
 
             let tty = processTree[detected.pid]?.tty.map { "/dev/\($0)" }
             logger.debug(
-                "Discovered running session: \(detected.agentId, privacy: .public) pid=\(detected.pid, privacy: .public) session=\(detected.sessionId, privacy: .public)"
+                "Discovered running session: legacy=\(detected.agentId, privacy: .public) adapter=\(detected.runtimeIdentity.adapterID.rawValue, privacy: .public) pid=\(detected.pid, privacy: .public) session=\(detected.sessionId, privacy: .public)"
             )
             await SessionStore.shared.process(
                 .processDetected(
