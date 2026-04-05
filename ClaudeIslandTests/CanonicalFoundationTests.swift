@@ -259,6 +259,23 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertEqual(choice?.submissionState, .idle)
     }
 
+    func testProjectionStoreRejectedChoiceKeepsDomainOpenForRetry() async {
+        let store = SessionProjectionStore()
+        await store.apply(CanonicalFixtures.choiceRequestedEvent(choiceID: "choice-rejected"))
+        await store.apply(CanonicalFixtures.choiceSubmittedEvent(choiceID: "choice-rejected"))
+        await store.apply(
+            CanonicalFixtures.choiceResolvedEvent(
+                choiceID: "choice-rejected",
+                result: .rejected
+            )
+        )
+
+        let snapshot = await store.snapshot()
+        let choice = snapshot.conversations["conversation-choice"]?.choices.first
+        XCTAssertEqual(choice?.domainState, .requested)
+        XCTAssertEqual(choice?.submissionState, .rejected)
+    }
+
     func testProjectionStorePlanStepMergeUsesStepIDOrText() async {
         let store = SessionProjectionStore()
         await store.apply(CanonicalFixtures.planUpdatedEvent(planID: "plan-merge"))
@@ -405,6 +422,52 @@ final class CanonicalFoundationTests: XCTestCase {
         )
     }
 
+    func testProjectedUIStateKeepsRejectedChoiceVisibleForRetry() async {
+        let snapshot = SessionProjectionSnapshot(
+            conversations: [
+                "conversation-choice": ProjectedConversationState(
+                    id: "conversation-choice",
+                    adapterID: .codexCLI,
+                    familyID: .codex,
+                    sourceKind: .api,
+                    title: "Choice Retry",
+                    cwd: "/tmp/choice-retry",
+                    status: .active,
+                    lastTransition: .created,
+                    turn: CanonicalFixtures.turn(),
+                    messages: [],
+                    tools: [],
+                    approvals: [],
+                    choices: [
+                        ProjectedChoiceState(
+                            id: "choice-rejected",
+                            toolID: "tool-choice-rejected",
+                            kind: .options,
+                            prompt: "Try again",
+                            schema: [:],
+                            options: [],
+                            domainState: .requested,
+                            submissionState: .rejected,
+                            submittedBy: .user,
+                            resolvedBy: .adapter,
+                            valueShape: .options,
+                            updatedAt: CanonicalFixtures.baseDate
+                        )
+                    ],
+                    plans: [],
+                    sessionCommandSubmissionStates: [:],
+                    lastUpdatedAt: CanonicalFixtures.baseDate
+                )
+            ],
+            capabilities: [:]
+        )
+
+        let state = ProjectedUIState(snapshot: snapshot)
+        XCTAssertEqual(state.sessionList.first?.pendingInteractionCount, 1)
+        XCTAssertTrue(state.sessionList.first?.needsAttention == true)
+        XCTAssertNotNil(state.interactionSurfaces["conversation-choice:choice:choice-rejected"])
+    }
+
     func testProjectedUIStateNamespacesInteractionSurfaceIDsByConversation() async {
         let store = SessionProjectionStore()
         await store.apply(
@@ -524,5 +587,95 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertEqual(sessions.first?.chatItems.count, 2)
         XCTAssertEqual(sessions.first?.displayTitle, "Fixture Session")
         XCTAssertEqual(fixtureBootSessionID, "conversation-fixture")
+    }
+
+    func testProjectionBootstrapFixtureRegistersShadowParitySnapshot() async throws {
+        await ProjectionBootstrap.shared.stop()
+        ShadowDiffLogger.updateProjectedSnapshot(nil)
+        defer {
+            Task {
+                await ProjectionBootstrap.shared.stop()
+                ShadowDiffLogger.updateProjectedSnapshot(nil)
+            }
+        }
+
+        let timestamp = CanonicalFixtures.baseDate
+        let snapshot = SessionProjectionSnapshot(
+            conversations: [
+                "conversation-fixture": ProjectedConversationState(
+                    id: "conversation-fixture",
+                    adapterID: .claudeCode,
+                    familyID: .claude,
+                    sourceKind: .hook,
+                    title: "Fixture Session",
+                    cwd: "/tmp/fixture-session",
+                    status: .active,
+                    lastTransition: .created,
+                    turn: CanonicalFixtures.turn(),
+                    messages: [],
+                    tools: [],
+                    approvals: [
+                        ProjectedApprovalState(
+                            id: "approval-fixture",
+                            toolID: "tool-fixture",
+                            kind: .tool,
+                            reason: nil,
+                            options: [.allowOnce],
+                            scope: .once,
+                            strength: .strong,
+                            domainState: .requested,
+                            submissionState: .idle,
+                            resolvedBy: nil,
+                            updatedAt: timestamp
+                        )
+                    ],
+                    choices: [],
+                    plans: [],
+                    sessionCommandSubmissionStates: [:],
+                    lastUpdatedAt: timestamp
+                )
+            ],
+            capabilities: [:]
+        )
+
+        let document = ProjectionFixtureDocument(
+            snapshot: snapshot,
+            sessions: [
+                .init(
+                    sessionID: "conversation-fixture",
+                    agentID: "claude",
+                    pid: 123,
+                    tty: "ttys001",
+                    isInTmux: true,
+                    lastActivity: timestamp,
+                    createdAt: timestamp
+                )
+            ]
+        )
+
+        let fixtureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("json")
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(CanonicalTimestampCoding.string(from: date))
+        }
+        try encoder.encode(document).write(to: fixtureURL)
+
+        await ProjectionBootstrap.shared.start(
+            mode: .projectedFixture(
+                .init(
+                    fixturePath: fixtureURL.path,
+                    initialContent: .instances
+                )
+            )
+        )
+
+        let paritySnapshot = ShadowDiffLogger.projectedSnapshotForTesting()
+        XCTAssertEqual(paritySnapshot?.sessionCount, 1)
+        XCTAssertEqual(paritySnapshot?.activeApprovalToolUseIDs["conversation-fixture"], "tool-fixture")
+        XCTAssertEqual(paritySnapshot?.pendingInteractionCounts["conversation-fixture"], 1)
     }
 }

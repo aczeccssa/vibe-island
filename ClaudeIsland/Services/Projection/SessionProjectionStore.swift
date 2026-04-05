@@ -721,6 +721,8 @@ actor SessionProjectionStore {
                 conversation.choices[index].domainState = .expired
                 conversation.choices[index].submissionState = .idle
             case .rejected:
+                // Rejection means the latest submission failed, but the choice remains open.
+                conversation.choices[index].domainState = .requested
                 conversation.choices[index].submissionState = .rejected
             case .unknown:
                 break

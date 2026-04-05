@@ -75,4 +75,10 @@ enum ShadowDiffLogger {
         defer { lock.unlock() }
         return projectedSnapshot
     }
+
+    #if DEBUG
+    static func projectedSnapshotForTesting() -> LegacySessionParitySnapshot? {
+        currentProjectedSnapshot()
+    }
+    #endif
 }

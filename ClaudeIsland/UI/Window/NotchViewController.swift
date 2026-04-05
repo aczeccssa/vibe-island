@@ -15,7 +15,6 @@ class PassThroughHostingView<Content: View>: NSHostingView<Content> {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         let localRect = hitTestRect()
-        print("PassThroughHostingView.hitTest point=\(point) localRect=\(localRect)")
         // Only accept hits within the panel rect
         guard localRect.contains(point) else {
             return nil  // Pass through to windows behind

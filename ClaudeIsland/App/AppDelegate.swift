@@ -109,6 +109,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if launchMode.startsLiveIngress {
+            AgentEventCoordinator.shared.stop()
+        }
         Mixpanel.mainInstance().flush()
         updateCheckTimer?.invalidate()
         screenObserver = nil

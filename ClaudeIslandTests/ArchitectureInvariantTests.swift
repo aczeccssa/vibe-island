@@ -172,6 +172,30 @@ final class ArchitectureInvariantTests: XCTestCase {
         )
     }
 
+    func testProjectionBootstrapOwnsShadowDiffRegistrationInsteadOfStore() throws {
+        let repoRoot = repoRootURL()
+        let bootstrapFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Projection/ProjectionBootstrap.swift"
+        )
+        let content = try String(contentsOf: bootstrapFile, encoding: .utf8)
+
+        XCTAssertTrue(
+            content.contains("ShadowDiffLogger.updateProjectedSnapshot"),
+            "ProjectionBootstrap must register projected parity snapshots for Phase 0 shadow diff."
+        )
+    }
+
+    func testAppDelegateTerminationStopsLiveIngressCoordinator() throws {
+        let repoRoot = repoRootURL()
+        let appDelegateFile = repoRoot.appendingPathComponent("ClaudeIsland/App/AppDelegate.swift")
+        let content = try String(contentsOf: appDelegateFile, encoding: .utf8)
+
+        XCTAssertTrue(
+            content.contains("AgentEventCoordinator.shared.stop()"),
+            "AppDelegate termination path must stop the live ingress coordinator."
+        )
+    }
+
     func testCurrentMainPathDoesNotReferencePhase2PlusCutoverSymbols() throws {
         let repoRoot = repoRootURL()
         let targetFiles = [

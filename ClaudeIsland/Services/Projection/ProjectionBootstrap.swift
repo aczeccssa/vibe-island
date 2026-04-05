@@ -300,6 +300,8 @@ actor ProjectionBootstrap {
                 snapshot: fixture.snapshot,
                 artifactsBySessionID: [:]
             )
+            let compatibility = CompatibilityStateProjector.project(fixture.snapshot)
+            ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
             let fixtureBootSessionID: String?
             switch initialContent {
             case .instances:
@@ -344,6 +346,8 @@ actor ProjectionBootstrap {
             snapshot: snapshot,
             artifactsBySessionID: artifactsBySessionID
         )
+        let compatibility = CompatibilityStateProjector.project(snapshot)
+        ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
         await MainActor.run {
             ProjectionCompatibilityStore.shared.update(
                 sessions: sessions,
