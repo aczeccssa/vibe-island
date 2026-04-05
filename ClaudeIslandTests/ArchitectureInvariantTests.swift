@@ -196,6 +196,63 @@ final class ArchitectureInvariantTests: XCTestCase {
         )
     }
 
+    func testAgentEventCoordinatorBootstrapsProjectionBeforeStartingLiveIngress() throws {
+        let repoRoot = repoRootURL()
+        let coordinatorFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Hooks/AgentEventCoordinator.swift"
+        )
+        let content = try String(contentsOf: coordinatorFile, encoding: .utf8)
+
+        let bootstrapRange = try XCTUnwrap(
+            content.range(of: "await ProjectionBootstrap.shared.start(mode: .current)")
+        )
+        let hookStartRange = try XCTUnwrap(
+            content.range(of: "HookSocketServer.shared.start(")
+        )
+        let processStartRange = try XCTUnwrap(
+            content.range(of: "await ProcessBasedAgentDetector.shared.start()")
+        )
+
+        XCTAssertLessThan(
+            content.distance(from: content.startIndex, to: bootstrapRange.lowerBound),
+            content.distance(from: content.startIndex, to: hookStartRange.lowerBound),
+            "Projection bootstrap must complete before hook ingress starts."
+        )
+        XCTAssertLessThan(
+            content.distance(from: content.startIndex, to: hookStartRange.lowerBound),
+            content.distance(from: content.startIndex, to: processStartRange.lowerBound),
+            "Hook ingress should start before process discovery in the coordinated startup sequence."
+        )
+    }
+
+    func testProjectionBootstrapAsyncMapUsesTaskGroupAndStableIndexes() throws {
+        let repoRoot = repoRootURL()
+        let bootstrapFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Projection/ProjectionBootstrap.swift"
+        )
+        let content = try String(contentsOf: bootstrapFile, encoding: .utf8)
+
+        XCTAssertTrue(
+            content.contains("await withTaskGroup(of: (Int, T).self)"),
+            "ProjectionBootstrap asyncMap should parallelize hydration work with a task group."
+        )
+        XCTAssertTrue(
+            content.contains("values[index] = value"),
+            "ProjectionBootstrap asyncMap must preserve input ordering while collecting concurrent results."
+        )
+    }
+
+    func testProjectFileDoesNotHardcodeDevelopmentTeamIdentifiers() throws {
+        let repoRoot = repoRootURL()
+        let projectFile = repoRoot.appendingPathComponent("ClaudeIsland.xcodeproj/project.pbxproj")
+        let content = try String(contentsOf: projectFile, encoding: .utf8)
+
+        XCTAssertFalse(
+            content.contains("DEVELOPMENT_TEAM = "),
+            "The shared project file must not hardcode a development team identifier."
+        )
+    }
+
     func testCurrentMainPathDoesNotReferencePhase2PlusCutoverSymbols() throws {
         let repoRoot = repoRootURL()
         let targetFiles = [

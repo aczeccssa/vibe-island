@@ -330,8 +330,8 @@ actor ProjectionBootstrap {
             .map(\.value)
 
         let artifactsBySessionID = Dictionary(
-            uniqueKeysWithValues: await activeMetadata.asyncMap { metadata in
-                let artifacts = await hydrateArtifacts(for: metadata)
+            uniqueKeysWithValues: await activeMetadata.asyncMap { [self] metadata in
+                let artifacts = await self.hydrateArtifacts(for: metadata)
                 return (metadata.sessionID, artifacts)
             }
         )
@@ -1110,16 +1110,24 @@ private enum ProjectionCompatibilityBuilder {
     }
 }
 
-private extension Array {
+private extension Array where Element: Sendable {
     func asyncMap<T: Sendable>(
-        _ transform: @Sendable (Element) async -> T
+        _ transform: @Sendable @escaping (Element) async -> T
     ) async -> [T] {
-        var values: [T] = []
-        values.reserveCapacity(count)
-        for element in self {
-            values.append(await transform(element))
+        await withTaskGroup(of: (Int, T).self) { group in
+            for (index, element) in enumerated() {
+                group.addTask {
+                    (index, await transform(element))
+                }
+            }
+
+            var values = Array<T?>(repeating: nil, count: count)
+            for await (index, value) in group {
+                values[index] = value
+            }
+
+            return values.compactMap { $0 }
         }
-        return values
     }
 }
 
