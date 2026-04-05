@@ -120,3 +120,42 @@ class NotchPanel: NSPanel {
         }
     }
 }
+
+/// Test-friendly fixture window that keeps the real notch UI but exposes a normal
+/// accessible window hierarchy for XCUITest.
+final class FixtureNotchWindow: NSWindow {
+    override init(
+        contentRect: NSRect,
+        styleMask style: NSWindow.StyleMask,
+        backing backingStoreType: NSWindow.BackingStoreType,
+        defer flag: Bool
+    ) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+
+        title = "Claude Island Fixture"
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        isMovable = false
+        isMovableByWindowBackground = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        level = .normal
+        collectionBehavior = [.fullScreenAuxiliary]
+        ignoresMouseEvents = false
+        isReleasedWhenClosed = true
+        tabbingMode = .disallowed
+
+        standardWindowButton(.closeButton)?.isHidden = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
+    }
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}

@@ -48,6 +48,7 @@ actor ProcessBasedAgentDetector {
                 "Hook-backed session process ended: \(session.agentId, privacy: .public) pid=\(pid, privacy: .public)"
             )
             await SessionStore.shared.process(.processSessionEnded(sessionId: session.sessionId))
+            await ProjectionBootstrap.shared.handleProcessEnded(sessionID: session.sessionId)
         }
     }
 
@@ -106,6 +107,13 @@ actor ProcessBasedAgentDetector {
                     pid: detected.pid,
                     tty: tty
                 )
+            )
+            await ProjectionBootstrap.shared.handleProcessDetected(
+                sessionID: detected.sessionId,
+                cwd: detected.cwd,
+                agentID: detected.agentId,
+                pid: detected.pid,
+                tty: tty
             )
         }
     }

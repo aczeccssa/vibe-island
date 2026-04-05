@@ -26,7 +26,7 @@ class PassThroughHostingView<Content: View>: NSHostingView<Content> {
 
 class NotchViewController: NSViewController {
     private let viewModel: NotchViewModel
-    private var hostingView: PassThroughHostingView<NotchView>!
+    private var hostingView: NSView!
 
     init(viewModel: NotchViewModel) {
         self.viewModel = viewModel
@@ -38,10 +38,17 @@ class NotchViewController: NSViewController {
     }
 
     override func loadView() {
-        hostingView = PassThroughHostingView(rootView: NotchView(viewModel: viewModel))
+        if ProjectionLaunchMode.current.isFixture {
+            hostingView = NSHostingView(rootView: FixtureWindowRootView(viewModel: viewModel))
+            self.view = hostingView
+            return
+        }
+
+        let passThroughHostingView = PassThroughHostingView(rootView: NotchView(viewModel: viewModel))
+        hostingView = passThroughHostingView
 
         // Calculate the hit-test rect based on panel state
-        hostingView.hitTestRect = { [weak self] in
+        passThroughHostingView.hitTestRect = { [weak self] in
             guard let self = self else { return .zero }
             let vm = self.viewModel
             let geometry = vm.geometry
@@ -89,5 +96,49 @@ class NotchViewController: NSViewController {
         }
 
         self.view = hostingView
+    }
+}
+
+private struct FixtureWindowRootView: View {
+    @ObservedObject var viewModel: NotchViewModel
+    @StateObject private var sessionMonitor = ClaudeSessionMonitor()
+
+    var body: some View {
+        Group {
+            if let explicitChatSession = explicitChatSession {
+                ChatView(
+                    sessionId: explicitChatSession.sessionId,
+                    initialSession: explicitChatSession,
+                    sessionMonitor: sessionMonitor,
+                    viewModel: viewModel
+                )
+                .accessibilityIdentifier("chat.view")
+            } else {
+                AgentInstancesView(
+                    sessionMonitor: sessionMonitor,
+                    viewModel: viewModel
+                )
+                .accessibilityIdentifier("instances.view")
+            }
+        }
+        .frame(width: viewModel.openedSize.width, height: viewModel.openedSize.height)
+        .padding(12)
+        .background(Color.black)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .preferredColorScheme(.dark)
+        .onAppear {
+            viewModel.notchOpen(reason: .boot)
+            sessionMonitor.startMonitoring()
+        }
+    }
+
+    private var explicitChatSession: SessionState? {
+        if case .chat(let session) = viewModel.contentType {
+            return session
+        }
+        guard let sessionID = ProjectionCompatibilityStore.shared.fixtureBootSessionID else {
+            return nil
+        }
+        return sessionMonitor.instances.first(where: { $0.sessionId == sessionID })
     }
 }

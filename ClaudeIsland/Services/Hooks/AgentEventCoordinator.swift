@@ -19,10 +19,17 @@ final class AgentEventCoordinator {
         guard !isStarted else { return }
         isStarted = true
 
+        Task {
+            await ProjectionBootstrap.shared.start(mode: .current)
+        }
+
         HookSocketServer.shared.start(
             onEvent: { event in
                 Task {
                     await SessionStore.shared.process(.hookReceived(event))
+                }
+                Task {
+                    await ProjectionBootstrap.shared.handleHookEvent(event)
                 }
 
                 if event.agentId == "claude", event.sessionPhase == .processing {
@@ -71,6 +78,9 @@ final class AgentEventCoordinator {
 
         Task {
             await ProcessBasedAgentDetector.shared.stop()
+        }
+        Task {
+            await ProjectionBootstrap.shared.stop()
         }
     }
 }

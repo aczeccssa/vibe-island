@@ -27,6 +27,7 @@ struct NotchView: View {
     @State private var isHovering: Bool = false
     @State private var isBouncing: Bool = false
     @State private var compactSessionCountMeasuredWidth: CGFloat = 0
+    @State private var appliedFixtureInitialContent = false
 
     /// The agent whose accent color should drive the compact header UI.
     private var activeAgentId: String? {
@@ -234,6 +235,10 @@ struct NotchView: View {
             if !viewModel.hasPhysicalNotch {
                 isVisible = true
             }
+            if ProjectionLaunchMode.current.isFixture {
+                isVisible = true
+                viewModel.notchOpen(reason: .boot)
+            }
         }
         .onChange(of: viewModel.status) { oldStatus, newStatus in
             handleStatusChange(from: oldStatus, to: newStatus)
@@ -242,6 +247,7 @@ struct NotchView: View {
             handleProcessingChange()
             handleWaitingForInputChange(instances)
             handleChoiceInteractionsChange(instances)
+            applyFixtureInitialContentIfNeeded(instances)
         }
     }
 
@@ -387,6 +393,7 @@ struct NotchView: View {
                         sessionMonitor: sessionMonitor,
                         viewModel: viewModel
                     )
+                    .accessibilityIdentifier("instances.view")
                 case .menu:
                     NotchMenuView(viewModel: viewModel)
                 case .chat(let session):
@@ -396,6 +403,7 @@ struct NotchView: View {
                         sessionMonitor: sessionMonitor,
                         viewModel: viewModel
                     )
+                    .accessibilityIdentifier("chat.view")
                 }
             }
         }
@@ -582,6 +590,28 @@ struct NotchView: View {
                     viewModel.clearInteraction(for: sessionId, interactionId: interaction.id)
                 }
             }
+        }
+    }
+
+    private func applyFixtureInitialContentIfNeeded(_ instances: [SessionState]) {
+        guard ProjectionLaunchMode.current.isFixture,
+              !appliedFixtureInitialContent else {
+            return
+        }
+
+        guard let sessionID = ProjectionCompatibilityStore.shared.fixtureBootSessionID else {
+            appliedFixtureInitialContent = true
+            return
+        }
+
+        guard let session = instances.first(where: { $0.sessionId == sessionID }) else {
+            return
+        }
+
+        appliedFixtureInitialContent = true
+        DispatchQueue.main.async {
+            viewModel.notchOpen(reason: .boot)
+            viewModel.showChat(for: session)
         }
     }
 }
