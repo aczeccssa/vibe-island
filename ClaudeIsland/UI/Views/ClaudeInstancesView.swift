@@ -36,6 +36,7 @@ struct AgentInstancesView: View {
                 .foregroundColor(.white.opacity(0.25))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("instances.empty")
     }
 
     // MARK: - Instances List
@@ -107,6 +108,7 @@ struct AgentInstancesView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
             }
+            .accessibilityIdentifier("instances.list")
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .scrollBounceBehavior(.basedOnSize)
             .onAppear {
@@ -317,6 +319,10 @@ struct AgentInstanceRow: View {
     }
 
     private var hostAppName: String {
+        if ProjectionLaunchMode.current.isFixture {
+            return "Fixture Host"
+        }
+
         guard let pid = session.pid else { return "Unknown App" }
 
         let tree = ProcessTreeBuilder.shared.buildTree()
@@ -481,19 +487,19 @@ struct AgentInstanceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                ClaudeCrabIcon(
-                    size: 34,
-                    color: agentAccentColor,
-                    animateLegs: session.phase == .processing || session.phase == .compacting
-                )
-                .frame(width: 46, height: 62, alignment: .center)
+                agentIcon
+                    .frame(width: 46, height: 62, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(session.displayTitle)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
+                        Button(action: onChat) {
+                            Text(session.displayTitle)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("session.title.\(session.sessionId)")
 
                         Spacer(minLength: 12)
 
@@ -525,7 +531,10 @@ struct AgentInstanceRow: View {
                         Spacer(minLength: 10)
                     }
 
-                    ActionLine(display: latestActionDisplay)
+                    ActionLine(
+                        display: latestActionDisplay,
+                        accessibilityID: "session.action.\(session.sessionId)"
+                    )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -549,6 +558,7 @@ struct AgentInstanceRow: View {
         .padding(.trailing, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
+        .accessibilityIdentifier("session.row.\(session.sessionId)")
         .onTapGesture {
             onChat()
         }
@@ -559,7 +569,23 @@ struct AgentInstanceRow: View {
         )
         .onHover { isHovered = $0 }
         .task {
+            guard !ProjectionLaunchMode.current.isFixture else { return }
             isYabaiAvailable = await WindowFinder.shared.isYabaiAvailable()
+        }
+    }
+
+    @ViewBuilder
+    private var agentIcon: some View {
+        if ProjectionLaunchMode.current.isFixture {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(agentAccentColor.opacity(0.85))
+                .frame(width: 28, height: 28)
+        } else {
+            ClaudeCrabIcon(
+                size: 34,
+                color: agentAccentColor,
+                animateLegs: session.phase == .processing || session.phase == .compacting
+            )
         }
     }
 
@@ -656,6 +682,7 @@ private struct SessionInteractionCard: View {
                     Text(question.question)
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.88))
+                        .accessibilityIdentifier(interactionQuestionAccessibilityIdentifier(question))
 
                     HStack(spacing: 8) {
                         ForEach(question.options) { option in
@@ -664,6 +691,7 @@ private struct SessionInteractionCard: View {
                                     option: option,
                                     onConfirm: { handleSelection(option, for: question) }
                                 )
+                                .accessibilityIdentifier(interactionOptionAccessibilityIdentifier(question, option))
                             } else {
                                 Button {
                                     handleSelection(option, for: question)
@@ -684,6 +712,7 @@ private struct SessionInteractionCard: View {
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(isSubmitting)
+                                .accessibilityIdentifier(interactionOptionAccessibilityIdentifier(question, option))
                             }
                         }
                     }
@@ -761,9 +790,21 @@ private struct SessionInteractionCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
         )
+        .accessibilityIdentifier("session.interaction.\(interaction.id)")
         .onChange(of: interaction.id) { _, _ in
             resetInteractionState()
         }
+    }
+
+    private func interactionQuestionAccessibilityIdentifier(_ question: InteractionQuestion) -> String {
+        "session.interaction.question.\(interaction.id).\(question.id)"
+    }
+
+    private func interactionOptionAccessibilityIdentifier(
+        _ question: InteractionQuestion,
+        _ option: InteractionOption
+    ) -> String {
+        "session.interaction.option.\(interaction.id).\(question.id).\(option.id)"
     }
 
     private func backgroundColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
@@ -839,6 +880,7 @@ private enum ActionTextDisplay {
 
 private struct ActionLine: View {
     let display: ActionTextDisplay
+    let accessibilityID: String
 
     var body: some View {
         switch display {
@@ -847,6 +889,7 @@ private struct ActionLine: View {
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.55))
                 .lineLimit(1)
+                .accessibilityIdentifier(accessibilityID)
         case .highlighted(let label, let detail, let color):
             HStack(spacing: 6) {
                 Text(label)
@@ -864,6 +907,7 @@ private struct ActionLine: View {
                     .foregroundColor(.white.opacity(0.55))
                     .lineLimit(1)
             }
+            .accessibilityIdentifier(accessibilityID)
         }
     }
 }

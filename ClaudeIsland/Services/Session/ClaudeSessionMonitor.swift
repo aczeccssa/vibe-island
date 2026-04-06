@@ -14,16 +14,24 @@ import Foundation
 class ClaudeSessionMonitor: ObservableObject {
     @Published var instances: [SessionState] = []
     @Published var pendingInstances: [SessionState] = []
+    @Published var hydratedSessionIDs: Set<String> = []
     @Published var interactionSubmitErrors: [String: String] = [:]
     @Published var submittingInteractionSessionIds: Set<String> = []
 
     private var cancellables = Set<AnyCancellable>()
 
     init() {
-        SessionStore.shared.sessionsPublisher
+        ProjectionCompatibilityStore.shared.$sessions
             .receive(on: DispatchQueue.main)
             .sink { [weak self] sessions in
                 self?.updateFromSessions(sessions)
+            }
+            .store(in: &cancellables)
+
+        ProjectionCompatibilityStore.shared.$hydratedSessionIDs
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] hydratedSessionIDs in
+                self?.hydratedSessionIDs = hydratedSessionIDs
             }
             .store(in: &cancellables)
 
@@ -33,10 +41,17 @@ class ClaudeSessionMonitor: ObservableObject {
     // MARK: - Monitoring Lifecycle
 
     func startMonitoring() {
-        AgentEventCoordinator.shared.start()
+        if ProjectionLaunchMode.current.startsLiveIngress {
+            AgentEventCoordinator.shared.start()
+        } else {
+            Task {
+                await ProjectionBootstrap.shared.start(mode: .current)
+            }
+        }
     }
 
     func stopMonitoring() {
+        guard ProjectionLaunchMode.current.startsLiveIngress else { return }
         AgentEventCoordinator.shared.stop()
     }
 
@@ -63,7 +78,9 @@ class ClaudeSessionMonitor: ObservableObject {
     /// Archive (remove) a session from the instances list
     func archiveSession(sessionId: String) {
         Task {
+            await ProjectionBootstrap.shared.archiveSession(sessionId)
             await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
+            await ProjectionBootstrap.shared.refresh()
         }
     }
 
@@ -78,7 +95,7 @@ class ClaudeSessionMonitor: ObservableObject {
             submittingInteractionSessionIds.remove(sessionId)
         }
 
-        guard let session = await SessionStore.shared.session(for: sessionId),
+        guard let session = sessionState(for: sessionId),
               !responses.isEmpty else {
             let result = InteractionSubmitResult.failure("Session not found")
             interactionSubmitErrors[sessionId] = result.error
@@ -123,6 +140,8 @@ class ClaudeSessionMonitor: ObservableObject {
                     break
                 }
 
+                await ProjectionBootstrap.shared.refresh()
+
                 return .success(via: .hookSocket)
             }
         }
@@ -155,6 +174,8 @@ class ClaudeSessionMonitor: ObservableObject {
                     )
                 )
             )
+
+            await ProjectionBootstrap.shared.refresh()
 
             return .success(via: .hookSocket)
         }
@@ -190,6 +211,8 @@ class ClaudeSessionMonitor: ObservableObject {
                     )
                 )
             )
+
+            await ProjectionBootstrap.shared.refresh()
 
             return .success(via: .hookSocket)
         }
@@ -232,6 +255,8 @@ class ClaudeSessionMonitor: ObservableObject {
             }
         }
 
+        await ProjectionBootstrap.shared.refresh()
+
         if let error = result.error {
             interactionSubmitErrors[sessionId] = error
         }
@@ -244,7 +269,7 @@ class ClaudeSessionMonitor: ObservableObject {
     }
 
     func focusSession(sessionId: String) async -> Bool {
-        guard let session = await SessionStore.shared.session(for: sessionId) else {
+        guard let session = sessionState(for: sessionId) else {
             return false
         }
 
@@ -263,7 +288,7 @@ class ClaudeSessionMonitor: ObservableObject {
     /// Request history load for a session
     func loadHistory(sessionId: String, cwd: String) {
         Task {
-            await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
+            await ProjectionBootstrap.shared.refresh()
         }
     }
 
@@ -285,7 +310,7 @@ class ClaudeSessionMonitor: ObservableObject {
         decisionId: String,
         reason: String? = nil
     ) async -> InteractionSubmitResult {
-        guard let session = await SessionStore.shared.session(for: sessionId),
+        guard let session = sessionState(for: sessionId),
               let permission = session.activePermission,
               let interaction = SessionInteractionRequest.from(
                 permission: permission,
@@ -319,6 +344,8 @@ class ClaudeSessionMonitor: ObservableObject {
                 break
             }
 
+            await ProjectionBootstrap.shared.refresh()
+
             return .success(via: .hookSocket)
         }
 
@@ -342,6 +369,8 @@ class ClaudeSessionMonitor: ObservableObject {
                 break
             }
         }
+
+        await ProjectionBootstrap.shared.refresh()
 
         if let error = result.error {
             interactionSubmitErrors[sessionId] = error
@@ -372,6 +401,10 @@ class ClaudeSessionMonitor: ObservableObject {
 
         return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
+
+    private func sessionState(for sessionId: String) -> SessionState? {
+        instances.first(where: { $0.sessionId == sessionId })
+    }
 }
 
 // MARK: - Interrupt Watcher Delegate
@@ -380,6 +413,8 @@ extension ClaudeSessionMonitor: JSONLInterruptWatcherDelegate {
     nonisolated func didDetectInterrupt(sessionId: String) {
         Task {
             await SessionStore.shared.process(.interruptDetected(sessionId: sessionId))
+            await ProjectionBootstrap.shared.handleInterruptDetected(sessionID: sessionId)
+            await ProjectionBootstrap.shared.refresh()
         }
 
         Task { @MainActor in

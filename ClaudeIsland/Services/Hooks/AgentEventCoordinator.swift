@@ -19,45 +19,49 @@ final class AgentEventCoordinator {
         guard !isStarted else { return }
         isStarted = true
 
-        HookSocketServer.shared.start(
-            onEvent: { event in
-                Task {
-                    await SessionStore.shared.process(.hookReceived(event))
-                }
+        Task {
+            await ProjectionBootstrap.shared.start(mode: .current)
+            HookSocketServer.shared.start(
+                onEvent: { event in
+                    Task {
+                        await SessionStore.shared.process(.hookReceived(event))
+                    }
+                    Task {
+                        await ProjectionBootstrap.shared.handleHookEvent(event)
+                    }
 
-                if event.agentId == "claude", event.sessionPhase == .processing {
-                    Task { @MainActor in
-                        InterruptWatcherManager.shared.startWatching(
-                            sessionId: event.sessionId,
-                            cwd: event.cwd
+                    if event.agentId == "claude", event.sessionPhase == .processing {
+                        Task { @MainActor in
+                            InterruptWatcherManager.shared.startWatching(
+                                sessionId: event.sessionId,
+                                cwd: event.cwd
+                            )
+                        }
+                    }
+
+                    if event.status == "ended" {
+                        Task { @MainActor in
+                            InterruptWatcherManager.shared.stopWatching(sessionId: event.sessionId)
+                        }
+                    }
+
+                    if event.event == HookEventType.stop.rawValue {
+                        HookSocketServer.shared.cancelPendingPermissions(sessionId: event.sessionId)
+                    }
+
+                    if event.event == HookEventType.postToolUse.rawValue, let toolUseId = event.toolUseId {
+                        HookSocketServer.shared.cancelPendingPermission(toolUseId: toolUseId)
+                    }
+                },
+                onPermissionFailure: { sessionId, toolUseId in
+                    Task {
+                        await SessionStore.shared.process(
+                            .permissionSocketFailed(sessionId: sessionId, toolUseId: toolUseId)
                         )
                     }
                 }
+            )
 
-                if event.status == "ended" {
-                    Task { @MainActor in
-                        InterruptWatcherManager.shared.stopWatching(sessionId: event.sessionId)
-                    }
-                }
-
-                if event.event == HookEventType.stop.rawValue {
-                    HookSocketServer.shared.cancelPendingPermissions(sessionId: event.sessionId)
-                }
-
-                if event.event == HookEventType.postToolUse.rawValue, let toolUseId = event.toolUseId {
-                    HookSocketServer.shared.cancelPendingPermission(toolUseId: toolUseId)
-                }
-            },
-            onPermissionFailure: { sessionId, toolUseId in
-                Task {
-                    await SessionStore.shared.process(
-                        .permissionSocketFailed(sessionId: sessionId, toolUseId: toolUseId)
-                    )
-                }
-            }
-        )
-
-        Task {
             await ProcessBasedAgentDetector.shared.start()
         }
     }
@@ -71,6 +75,9 @@ final class AgentEventCoordinator {
 
         Task {
             await ProcessBasedAgentDetector.shared.stop()
+        }
+        Task {
+            await ProjectionBootstrap.shared.stop()
         }
     }
 }

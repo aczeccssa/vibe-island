@@ -13,6 +13,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     let updater: SPUUpdater
     private let userDriver: NotchUserDriver
+    private let launchMode = ProjectionLaunchMode.current
 
     var windowController: NotchWindowController? {
         windowManager?.windowController
@@ -29,10 +30,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
         AppDelegate.shared = self
 
-        do {
-            try updater.start()
-        } catch {
-            print("Failed to start Sparkle updater: \(error)")
+        if launchMode.allowsExternalSideEffects {
+            do {
+                try updater.start()
+            } catch {
+                print("Failed to start Sparkle updater: \(error)")
+            }
         }
     }
 
@@ -42,50 +45,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        Mixpanel.initialize(token: "49814c1436104ed108f3fc4735228496")
+        if launchMode.allowsExternalSideEffects {
+            Mixpanel.initialize(token: "49814c1436104ed108f3fc4735228496")
 
-        let distinctId = getOrCreateDistinctId()
-        Mixpanel.mainInstance().identify(distinctId: distinctId)
+            let distinctId = getOrCreateDistinctId()
+            Mixpanel.mainInstance().identify(distinctId: distinctId)
 
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
-        let osVersion = Foundation.ProcessInfo.processInfo.operatingSystemVersionString
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+            let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
+            let osVersion = Foundation.ProcessInfo.processInfo.operatingSystemVersionString
 
-        Mixpanel.mainInstance().registerSuperProperties([
-            "app_version": version,
-            "build_number": build,
-            "macos_version": osVersion
-        ])
+            Mixpanel.mainInstance().registerSuperProperties([
+                "app_version": version,
+                "build_number": build,
+                "macos_version": osVersion
+            ])
 
-        fetchAndRegisterClaudeVersion()
+            fetchAndRegisterClaudeVersion()
 
-        Mixpanel.mainInstance().people.set(properties: [
-            "app_version": version,
-            "build_number": build,
-            "macos_version": osVersion
-        ])
+            Mixpanel.mainInstance().people.set(properties: [
+                "app_version": version,
+                "build_number": build,
+                "macos_version": osVersion
+            ])
 
-        Mixpanel.mainInstance().track(event: "App Launched")
-        Mixpanel.mainInstance().flush()
+            Mixpanel.mainInstance().track(event: "App Launched")
+            Mixpanel.mainInstance().flush()
+        }
 
-        HookInstaller.installIfNeeded()
-        AgentEventCoordinator.shared.start()
-        NSApplication.shared.setActivationPolicy(.accessory)
+        if launchMode.startsLiveIngress {
+            HookInstaller.installIfNeeded()
+            AgentEventCoordinator.shared.start()
+        }
+        NSApplication.shared.setActivationPolicy(launchMode.isFixture ? .regular : .accessory)
 
         windowManager = WindowManager()
         _ = windowManager?.setupNotchWindow()
+
+        if launchMode.isFixture {
+            windowManager?.windowController?.window?.ignoresMouseEvents = false
+            windowManager?.windowController?.window?.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
 
         screenObserver = ScreenObserver { [weak self] in
             self?.handleScreenChange()
         }
 
-        if updater.canCheckForUpdates {
-            updater.checkForUpdates()
-        }
+        if launchMode.allowsExternalSideEffects {
+            if updater.canCheckForUpdates {
+                updater.checkForUpdates()
+            }
 
-        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
-            guard let updater = self?.updater, updater.canCheckForUpdates else { return }
-            updater.checkForUpdates()
+            updateCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+                guard let updater = self?.updater, updater.canCheckForUpdates else { return }
+                updater.checkForUpdates()
+            }
         }
     }
 
@@ -94,6 +109,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if launchMode.startsLiveIngress {
+            AgentEventCoordinator.shared.stop()
+        }
         Mixpanel.mainInstance().flush()
         updateCheckTimer?.invalidate()
         screenObserver = nil

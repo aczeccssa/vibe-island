@@ -8,7 +8,7 @@
 
 import Foundation
 
-enum RuntimeAdapterID: String, CaseIterable, Sendable {
+enum RuntimeAdapterID: String, CaseIterable, Codable, Hashable, Sendable {
     case claudeCode = "claude-code"
     case codexCLI = "codex-cli"
     case codexApp = "codex-app"
@@ -16,20 +16,20 @@ enum RuntimeAdapterID: String, CaseIterable, Sendable {
     case opencode = "opencode"
 }
 
-enum RuntimeFamilyID: String, CaseIterable, Sendable {
+enum RuntimeFamilyID: String, CaseIterable, Codable, Hashable, Sendable {
     case claude
     case codex
     case gemini
     case opencode
 }
 
-enum RuntimeModeHint: String, Sendable {
+enum RuntimeModeHint: String, Codable, Hashable, Sendable {
     case cli
     case app
     case unknown
 }
 
-struct RuntimeIdentity: Equatable, Sendable {
+struct RuntimeIdentity: Codable, Equatable, Hashable, Sendable {
     let adapterID: RuntimeAdapterID
     let familyID: RuntimeFamilyID
     let modeHint: RuntimeModeHint

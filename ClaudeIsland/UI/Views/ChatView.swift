@@ -33,10 +33,9 @@ struct ChatView: View {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._session = State(initialValue: initialSession)
 
-        // Initialize from cache if available (prevents loading flicker on view recreation)
-        let cachedHistory = ChatHistoryManager.shared.history(for: sessionId)
-        let alreadyLoaded = !cachedHistory.isEmpty
-        self._history = State(initialValue: cachedHistory)
+        let initialHistory = initialSession.chatItems
+        let alreadyLoaded = !initialHistory.isEmpty
+        self._history = State(initialValue: initialHistory)
         self._isLoading = State(initialValue: !alreadyLoaded)
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
     }
@@ -95,60 +94,13 @@ struct ChatView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isWaitingForApproval)
         .animation(nil, value: viewModel.status)
         .task {
-            // Skip if already loaded (prevents redundant work on view recreation)
             guard !hasLoadedOnce else { return }
             hasLoadedOnce = true
 
-            // Check if already loaded (from previous visit)
-            let cachedHistory = ChatHistoryManager.shared.history(for: sessionId)
-            if ChatHistoryManager.shared.isLoaded(sessionId: sessionId), !cachedHistory.isEmpty {
-                history = cachedHistory
-                isLoading = false
-                return
-            }
-
-            // Load in background, show loading state
-            await ChatHistoryManager.shared.loadFromFile(
-                sessionId: sessionId,
-                cwd: session.cwd,
-                forceReload: cachedHistory.isEmpty
-            )
-            history = ChatHistoryManager.shared.history(for: sessionId)
-
-            withAnimation(.easeOut(duration: 0.2)) {
-                isLoading = false
-            }
-        }
-        .onReceive(ChatHistoryManager.shared.$histories) { histories in
-            // Update when count changes, last item differs, or content changes (e.g., tool status)
-            if let newHistory = histories[sessionId] {
-                let countChanged = newHistory.count != history.count
-                let lastItemChanged = newHistory.last?.id != history.last?.id
-                // Always update - the @Published ensures we only get notified on real changes
-                // This allows tool status updates (waitingForApproval -> running) to reflect
-                if countChanged || lastItemChanged || newHistory != history {
-                    // Track new messages when autoscroll is paused
-                    if isAutoscrollPaused && newHistory.count > previousHistoryCount {
-                        let addedCount = newHistory.count - previousHistoryCount
-                        newMessageCount += addedCount
-                        previousHistoryCount = newHistory.count
-                    }
-
-                    history = newHistory
-
-                    // Auto-scroll to bottom only if autoscroll is NOT paused
-                    if !isAutoscrollPaused && countChanged {
-                        shouldScrollToBottom = true
-                    }
-
-                    // If we have data, skip loading state (handles view recreation)
-                    if isLoading && !newHistory.isEmpty {
-                        isLoading = false
-                    }
+            if sessionMonitor.hydratedSessionIDs.contains(sessionId) || !history.isEmpty {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isLoading = false
                 }
-            } else if hasLoadedOnce {
-                // Session was loaded but is now gone (removed via /clear) - navigate back
-                viewModel.exitChat()
             }
         }
         .onReceive(sessionMonitor.$instances) { sessions in
@@ -156,14 +108,43 @@ struct ChatView: View {
                updated != session {
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
+                let newHistory = updated.chatItems
+                let countChanged = newHistory.count != history.count
                 session = updated
+                history = newHistory
                 let isNowProcessing = updated.phase == .processing
+
+                if isAutoscrollPaused && newHistory.count > previousHistoryCount {
+                    let addedCount = newHistory.count - previousHistoryCount
+                    newMessageCount += addedCount
+                    previousHistoryCount = newHistory.count
+                } else {
+                    previousHistoryCount = newHistory.count
+                }
+
+                if !isAutoscrollPaused && countChanged {
+                    shouldScrollToBottom = true
+                }
+
+                if isLoading && (sessionMonitor.hydratedSessionIDs.contains(sessionId) || !newHistory.isEmpty) {
+                    isLoading = false
+                }
 
                 if wasWaiting && isNowProcessing {
                     // Scroll to bottom after permission accepted (with slight delay)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         shouldScrollToBottom = true
                     }
+                }
+            } else if hasLoadedOnce && !sessions.contains(where: { $0.sessionId == sessionId }) {
+                viewModel.exitChat()
+            }
+        }
+        .onReceive(sessionMonitor.$hydratedSessionIDs) { hydratedSessionIDs in
+            guard hydratedSessionIDs.contains(sessionId) else { return }
+            if isLoading {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isLoading = false
                 }
             }
         }
@@ -215,6 +196,7 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .onHover { isHeaderHovered = $0 }
+        .accessibilityIdentifier("chat.header")
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color.black.opacity(0.2))
@@ -258,6 +240,7 @@ struct ChatView: View {
                 .foregroundColor(.white.opacity(0.4))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("chat.loading")
     }
 
     // MARK: - Empty State
@@ -272,6 +255,7 @@ struct ChatView: View {
                 .foregroundColor(.white.opacity(0.4))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("chat.empty")
     }
 
     // MARK: - Message List
@@ -300,7 +284,10 @@ struct ChatView: View {
                     }
 
                     ForEach(history.reversed()) { item in
-                        MessageItemView(item: item, sessionId: sessionId)
+                        MessageItemView(
+                            item: item,
+                            agentDescriptions: session.subagentState.agentDescriptions
+                        )
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                             .transition(.asymmetric(
@@ -315,6 +302,7 @@ struct ChatView: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: history.count)
             }
             .scaleEffect(x: 1, y: -1)
+            .accessibilityIdentifier("chat.messages")
             .onScrollGeometryChange(for: Bool.self) { geometry in
                 // Check if we're near the top of the content (which is bottom in inverted view)
                 // contentOffset.y near 0 means at bottom, larger means scrolled up
@@ -374,6 +362,7 @@ struct ChatView: View {
                 .foregroundColor(canSendMessages ? .white : .white.opacity(0.4))
                 .focused($isInputFocused)
                 .disabled(!canSendMessages)
+                .accessibilityIdentifier("chat.input")
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .background(
@@ -562,20 +551,35 @@ struct ChatView: View {
 
 struct MessageItemView: View {
     let item: ChatHistoryItem
-    let sessionId: String
+    let agentDescriptions: [String: String]
 
     var body: some View {
+        content
+            .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch item.type {
         case .user(let text):
             UserMessageView(text: text)
         case .assistant(let text):
             AssistantMessageView(text: text)
         case .toolCall(let tool):
-            ToolCallView(tool: tool, sessionId: sessionId)
+            ToolCallView(tool: tool, agentDescriptions: agentDescriptions)
         case .thinking(let text):
             ThinkingView(text: text)
         case .interrupted:
             InterruptedMessageView()
+        }
+    }
+
+    private var accessibilityIdentifier: String {
+        switch item.type {
+        case .toolCall:
+            return "chat.tool.\(item.id)"
+        case .user, .assistant, .thinking, .interrupted:
+            return "chat.message.\(item.id)"
         }
     }
 }
@@ -662,7 +666,7 @@ struct ProcessingIndicatorView: View {
 
 struct ToolCallView: View {
     let tool: ToolCallItem
-    let sessionId: String
+    let agentDescriptions: [String: String]
 
     @State private var pulseOpacity: Double = 0.6
     @State private var isExpanded: Bool = false
@@ -756,11 +760,10 @@ struct ToolCallView: View {
 
     private var agentDescription: String? {
         guard tool.name == "AgentOutputTool",
-              let agentId = tool.input["agentId"],
-              let sessionDescriptions = ChatHistoryManager.shared.agentDescriptions[sessionId] else {
+              let agentId = tool.input["agentId"] else {
             return nil
         }
-        return sessionDescriptions[agentId]
+        return agentDescriptions[agentId]
     }
 
     var body: some View {
@@ -1239,6 +1242,7 @@ struct ChatInteractionPromptBar: View {
                     Text(question.question)
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.86))
+                        .accessibilityIdentifier(interactionQuestionAccessibilityIdentifier(question))
 
                     HStack(spacing: 8) {
                         ForEach(question.options) { option in
@@ -1247,6 +1251,7 @@ struct ChatInteractionPromptBar: View {
                                     option: option,
                                     onConfirm: { handleSelection(option, for: question) }
                                 )
+                                .accessibilityIdentifier(interactionOptionAccessibilityIdentifier(question, option))
                             } else {
                                 Button {
                                     handleSelection(option, for: question)
@@ -1263,6 +1268,7 @@ struct ChatInteractionPromptBar: View {
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(isSubmitting)
+                                .accessibilityIdentifier(interactionOptionAccessibilityIdentifier(question, option))
                             }
                         }
                     }
@@ -1334,9 +1340,21 @@ struct ChatInteractionPromptBar: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color.black.opacity(0.2))
+        .accessibilityIdentifier("chat.interaction.\(interaction.id)")
         .onChange(of: interaction.id) { _, _ in
             resetInteractionState()
         }
+    }
+
+    private func interactionQuestionAccessibilityIdentifier(_ question: InteractionQuestion) -> String {
+        "chat.interaction.question.\(interaction.id).\(question.id)"
+    }
+
+    private func interactionOptionAccessibilityIdentifier(
+        _ question: InteractionQuestion,
+        _ option: InteractionOption
+    ) -> String {
+        "chat.interaction.option.\(interaction.id).\(question.id).\(option.id)"
     }
 
     private func backgroundColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {

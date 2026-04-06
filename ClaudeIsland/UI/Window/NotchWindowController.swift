@@ -46,12 +46,22 @@ class NotchWindowController: NSWindowController {
         )
 
         // Create the window
-        let notchWindow = NotchPanel(
-            contentRect: windowFrame,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
+        let notchWindow: NSWindow
+        if ProjectionLaunchMode.current.isFixture {
+            notchWindow = FixtureNotchWindow(
+                contentRect: windowFrame,
+                styleMask: [.titled, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+        } else {
+            notchWindow = NotchPanel(
+                contentRect: windowFrame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+        }
 
         super.init(window: notchWindow)
 
@@ -94,9 +104,11 @@ class NotchWindowController: NSWindowController {
         // Start with ignoring mouse events (closed state)
         notchWindow.ignoresMouseEvents = true
 
-        // Perform boot animation after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.viewModel.performBootAnimation()
+        if !ProjectionLaunchMode.current.isFixture {
+            // Perform boot animation after a brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.viewModel.performBootAnimation()
+            }
         }
     }
 

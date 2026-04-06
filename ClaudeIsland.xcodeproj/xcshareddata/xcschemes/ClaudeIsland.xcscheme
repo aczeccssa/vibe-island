@@ -29,6 +29,39 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B1B2C3CF2F01000100000001"
+               BuildableName = "ClaudeIslandTests.xctest"
+               BlueprintName = "ClaudeIslandTests"
+               ReferencedContainer = "container:ClaudeIsland.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "C1D2E3EF2F02000100000001"
+               BuildableName = "ClaudeIslandUITests.xctest"
+               BlueprintName = "ClaudeIslandUITests"
+               ReferencedContainer = "container:ClaudeIsland.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+      <MacroExpansion>
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "FD33FD5C2EDF32D7002A6548"
+            BuildableName = "Claude Island.app"
+            BlueprintName = "ClaudeIsland"
+            ReferencedContainer = "container:ClaudeIsland.xcodeproj">
+         </BuildableReference>
+      </MacroExpansion>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
