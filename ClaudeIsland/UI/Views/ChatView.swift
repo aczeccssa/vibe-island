@@ -10,13 +10,13 @@ import SwiftUI
 
 struct ChatView: View {
     let sessionId: String
-    let initialSession: SessionState
+    let initialSession: ProjectedSessionViewState
     let sessionMonitor: ClaudeSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
 
     @State private var inputText: String = ""
-    @State private var history: [ChatHistoryItem] = []
-    @State private var session: SessionState
+    @State private var history: [ProjectedTimelineItemState] = []
+    @State private var session: ProjectedSessionViewState
     @State private var isLoading: Bool = true
     @State private var hasLoadedOnce: Bool = false
     @State private var shouldScrollToBottom: Bool = false
@@ -26,14 +26,14 @@ struct ChatView: View {
     @State private var isBottomVisible: Bool = true
     @FocusState private var isInputFocused: Bool
 
-    init(sessionId: String, initialSession: SessionState, sessionMonitor: ClaudeSessionMonitor, viewModel: NotchViewModel) {
+    init(sessionId: String, initialSession: ProjectedSessionViewState, sessionMonitor: ClaudeSessionMonitor, viewModel: NotchViewModel) {
         self.sessionId = sessionId
         self.initialSession = initialSession
         self.sessionMonitor = sessionMonitor
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._session = State(initialValue: initialSession)
 
-        let initialHistory = initialSession.chatItems
+        let initialHistory = initialSession.timeline
         let alreadyLoaded = !initialHistory.isEmpty
         self._history = State(initialValue: initialHistory)
         self._isLoading = State(initialValue: !alreadyLoaded)
@@ -45,21 +45,8 @@ struct ChatView: View {
         session.phase.isWaitingForApproval
     }
 
-    private var activeInteraction: SessionInteractionRequest? {
-        if let interaction = session.activeInteraction {
-            return interaction
-        }
-
-        guard let permission = session.activePermission else {
-            return nil
-        }
-
-        return SessionInteractionRequest.from(
-            permission: permission,
-            sessionId: session.sessionId,
-            agentId: session.agentId,
-            submitMode: SessionInteractionRequest.submitMode(isInTmux: session.isInTmux, tty: session.tty)
-        )
+    private var activeInteraction: ProjectedPromptState? {
+        session.prompt
     }
 
     
@@ -104,11 +91,11 @@ struct ChatView: View {
             }
         }
         .onReceive(sessionMonitor.$instances) { sessions in
-            if let updated = sessions.first(where: { $0.sessionId == sessionId }),
+            if let updated = sessions.first(where: { $0.sessionID == sessionId }),
                updated != session {
                 // Check if permission was just accepted (transition from waitingForApproval to processing)
                 let wasWaiting = isWaitingForApproval
-                let newHistory = updated.chatItems
+                let newHistory = updated.timeline
                 let countChanged = newHistory.count != history.count
                 session = updated
                 history = newHistory
@@ -136,7 +123,7 @@ struct ChatView: View {
                         shouldScrollToBottom = true
                     }
                 }
-            } else if hasLoadedOnce && !sessions.contains(where: { $0.sessionId == sessionId }) {
+            } else if hasLoadedOnce && !sessions.contains(where: { $0.sessionID == sessionId }) {
                 viewModel.exitChat()
             }
         }
@@ -215,13 +202,13 @@ struct ChatView: View {
 
     /// Whether the session is currently processing
     private var isProcessing: Bool {
-        session.phase == .processing || session.phase == .compacting
+        session.phase.isProcessingLike
     }
 
     /// Get the last user message ID for stable text selection per turn
     private var lastUserMessageId: String {
         for item in history.reversed() {
-            if case .user = item.type {
+            if case .user = item.content {
                 return item.id
             }
         }
@@ -284,10 +271,7 @@ struct ChatView: View {
                     }
 
                     ForEach(history.reversed()) { item in
-                        MessageItemView(
-                            item: item,
-                            agentDescriptions: session.subagentState.agentDescriptions
-                        )
+                        MessageItemView(item: item)
                             .padding(.horizontal, 16)
                             .scaleEffect(x: 1, y: -1)
                             .transition(.asymmetric(
@@ -425,7 +409,7 @@ struct ChatView: View {
         )
     }
 
-    private func interactionPromptBar(_ interaction: SessionInteractionRequest) -> some View {
+    private func interactionPromptBar(_ interaction: ProjectedPromptState) -> some View {
         ChatInteractionPromptBar(
             interaction: interaction,
             isSubmitting: sessionMonitor.submittingInteractionSessionIds.contains(sessionId),
@@ -480,14 +464,14 @@ struct ChatView: View {
         sessionMonitor.bypassPermission(sessionId: sessionId)
     }
 
-    private func submitInteractionOption(_ option: InteractionOption) {
-        let questionId = session.activeInteraction?.questions.first?.id ?? "question-0"
-        submitInteractionResponses([InteractionResponse(questionId: questionId, option: option)])
+    private func submitInteractionOption(_ option: ProjectedInteractionOptionState) {
+        let questionId = session.prompt?.questions.first?.id ?? "question-0"
+        submitInteractionResponses([ProjectedPromptSelection(questionID: questionId, option: option)])
     }
 
-    private func submitInteractionResponses(_ responses: [InteractionResponse]) {
+    private func submitInteractionResponses(_ responses: [ProjectedPromptSelection]) {
         Task {
-            _ = await sessionMonitor.submitInteraction(sessionId: sessionId, responses: responses)
+            _ = await sessionMonitor.submitInteraction(sessionId: sessionId, selections: responses)
         }
     }
 
@@ -550,8 +534,7 @@ struct ChatView: View {
 // MARK: - Message Item View
 
 struct MessageItemView: View {
-    let item: ChatHistoryItem
-    let agentDescriptions: [String: String]
+    let item: ProjectedTimelineItemState
 
     var body: some View {
         content
@@ -560,13 +543,13 @@ struct MessageItemView: View {
 
     @ViewBuilder
     private var content: some View {
-        switch item.type {
+        switch item.content {
         case .user(let text):
             UserMessageView(text: text)
         case .assistant(let text):
             AssistantMessageView(text: text)
-        case .toolCall(let tool):
-            ToolCallView(tool: tool, agentDescriptions: agentDescriptions)
+        case .tool(let tool):
+            ToolCallView(tool: tool)
         case .thinking(let text):
             ThinkingView(text: text)
         case .interrupted:
@@ -575,8 +558,8 @@ struct MessageItemView: View {
     }
 
     private var accessibilityIdentifier: String {
-        switch item.type {
-        case .toolCall:
+        switch item.content {
+        case .tool:
             return "chat.tool.\(item.id)"
         case .user, .assistant, .thinking, .interrupted:
             return "chat.message.\(item.id)"
@@ -666,7 +649,6 @@ struct ProcessingIndicatorView: View {
 
 struct ToolCallView: View {
     let tool: ToolCallItem
-    let agentDescriptions: [String: String]
 
     @State private var pulseOpacity: Double = 0.6
     @State private var isExpanded: Bool = false
@@ -706,34 +688,7 @@ struct ToolCallView: View {
         guard tool.status == .running || tool.status == .waitingForApproval else {
             return nil
         }
-
-        if let question = tool.input["interaction_question"], !question.isEmpty {
-            let options = tool.input["interaction_options"] ?? ""
-            return options.isEmpty ? question : "\(question)\n\(options)"
-        }
-
-        if tool.name == "request_user_input",
-           let rawQuestions = tool.input["questions"],
-           let formatted = formatQuestions(rawQuestions) {
-            return formatted
-        }
-
-        if tool.status == .waitingForApproval {
-            let interestingKeys = [
-                "command", "justification", "description", "reason",
-                "permission_request_text", "request_text", "path", "file_path",
-                "source_tool_input_json"
-            ]
-
-            let lines = interestingKeys.compactMap { key -> String? in
-                guard let value = tool.input[key], !value.isEmpty else { return nil }
-                return "\(key): \(value)"
-            }
-
-            return lines.isEmpty ? nil : lines.joined(separator: "\n")
-        }
-
-        return nil
+        return tool.pendingDetailsText
     }
 
     /// Whether the tool can be expanded (has result, NOT Task tools, NOT Edit tools)
@@ -758,14 +713,6 @@ struct ToolCallView: View {
         tool.name == "Edit" || isExpanded || pendingDetailsText != nil || showsAskUserResultInline
     }
 
-    private var agentDescription: String? {
-        guard tool.name == "AgentOutputTool",
-              let agentId = tool.input["agentId"] else {
-            return nil
-        }
-        return agentDescriptions[agentId]
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -786,15 +733,14 @@ struct ToolCallView: View {
                     .fixedSize()
 
                 if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                    let taskDesc = tool.input["description"] ?? "Running agent..."
+                    let taskDesc = tool.headerDetailText ?? "Running agent..."
                     Text("\(taskDesc) (\(tool.subagentTools.count) tools)")
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                } else if tool.name == "AgentOutputTool", let desc = agentDescription {
-                    let blocking = tool.input["block"] == "true"
-                    Text(blocking ? "Waiting: \(desc)" : desc)
+                } else if let detail = tool.headerDetailText {
+                    Text(detail)
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
@@ -883,27 +829,6 @@ struct ToolCallView: View {
         }
     }
 
-    private func formatQuestions(_ rawQuestions: String) -> String? {
-        guard let data = rawQuestions.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return nil
-        }
-
-        let lines = json.compactMap { question -> String? in
-            guard let text = question["question"] as? String else { return nil }
-            let options = (question["options"] as? [[String: Any]] ?? []).compactMap { option -> String? in
-                guard let label = option["label"] as? String else { return nil }
-                if let description = option["description"] as? String, !description.isEmpty {
-                    return "- \(label): \(description)"
-                }
-                return "- \(label)"
-            }
-            return ([text] + options).joined(separator: "\n")
-        }
-
-        let joined = lines.joined(separator: "\n\n")
-        return joined.isEmpty ? nil : joined
-    }
 }
 
 struct PendingToolDetailsView: View {
@@ -1177,16 +1102,16 @@ struct ChatInteractivePromptBar: View {
 }
 
 struct ChatInteractionPromptBar: View {
-    let interaction: SessionInteractionRequest
+    let interaction: ProjectedPromptState
     let isSubmitting: Bool
     let submitError: String?
     let onOpenHostApp: () -> Void
-    let onSubmitResponses: ([InteractionResponse]) -> Void
+    let onSubmitResponses: ([ProjectedPromptSelection]) -> Void
 
-    @State private var selections: [String: InteractionOption] = [:]
+    @State private var selections: [String: ProjectedInteractionOptionState] = [:]
     @State private var currentQuestionIndex = 0
 
-    private var currentQuestion: InteractionQuestion? {
+    private var currentQuestion: ProjectedInteractionQuestionState? {
         guard !interaction.questions.isEmpty else { return nil }
         return interaction.questions[min(currentQuestionIndex, interaction.questions.count - 1)]
     }
@@ -1346,18 +1271,18 @@ struct ChatInteractionPromptBar: View {
         }
     }
 
-    private func interactionQuestionAccessibilityIdentifier(_ question: InteractionQuestion) -> String {
+    private func interactionQuestionAccessibilityIdentifier(_ question: ProjectedInteractionQuestionState) -> String {
         "chat.interaction.question.\(interaction.id).\(question.id)"
     }
 
     private func interactionOptionAccessibilityIdentifier(
-        _ question: InteractionQuestion,
-        _ option: InteractionOption
+        _ question: ProjectedInteractionQuestionState,
+        _ option: ProjectedInteractionOptionState
     ) -> String {
         "chat.interaction.option.\(interaction.id).\(question.id).\(option.id)"
     }
 
-    private func backgroundColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
+    private func backgroundColor(for role: ProjectedInteractionOptionRole, isSelected: Bool = false) -> Color {
         if isSelected {
             return TerminalColors.amber.opacity(0.82)
         }
@@ -1373,7 +1298,7 @@ struct ChatInteractionPromptBar: View {
         }
     }
 
-    private func foregroundColor(for role: InteractionOptionRole) -> Color {
+    private func foregroundColor(for role: ProjectedInteractionOptionRole) -> Color {
         switch role {
         case .primary:
             return .black.opacity(0.9)
@@ -1386,18 +1311,18 @@ struct ChatInteractionPromptBar: View {
         }
     }
 
-    private func handleSelection(_ option: InteractionOption, for question: InteractionQuestion) {
+    private func handleSelection(_ option: ProjectedInteractionOptionState, for question: ProjectedInteractionQuestionState) {
         if interaction.isMultiQuestion {
             selections[question.id] = option
         } else {
-            onSubmitResponses([InteractionResponse(questionId: question.id, option: option)])
+            onSubmitResponses([ProjectedPromptSelection(questionID: question.id, option: option)])
         }
     }
 
     private func submitAllResponses() {
         onSubmitResponses(interaction.questions.compactMap { question in
             guard let option = selections[question.id] else { return nil }
-            return InteractionResponse(questionId: question.id, option: option)
+            return ProjectedPromptSelection(questionID: question.id, option: option)
         })
     }
 

@@ -6,22 +6,43 @@
 //
 
 import Foundation
+import os.log
 
 @MainActor
 struct HookInstaller {
+    private static let logger = Logger(subsystem: "com.claudeisland", category: "HookInstaller")
+    private static let hookAgents: [any HookInstallableAgent] = [
+        ClaudeCodeAgent(),
+        CodexAgent(),
+        GeminiCLIAgent()
+    ]
 
     /// Install hook scripts and update hook settings for all supported agents.
     static func installIfNeeded() {
-        AgentRegistry.shared.installHooksForAll()
+        for agent in hookAgents where agent.supportsHooks {
+            do {
+                try agent.installHooks()
+            } catch {
+                logger.error("Failed to install hooks for \(agent.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     /// Check if hooks are currently installed for all hook-capable agents.
     static func isInstalled() -> Bool {
-        AgentRegistry.shared.areAllHooksInstalled()
+        let capableAgents = hookAgents.filter { $0.supportsHooks }
+        guard !capableAgents.isEmpty else { return false }
+        return capableAgents.allSatisfy { $0.areHooksInstalled() }
     }
 
     /// Uninstall hooks for all hook-capable agents.
     static func uninstall() {
-        AgentRegistry.shared.uninstallHooksForAll()
+        for agent in hookAgents where agent.supportsHooks {
+            do {
+                try agent.uninstallHooks()
+            } catch {
+                logger.error("Failed to uninstall hooks for \(agent.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 }

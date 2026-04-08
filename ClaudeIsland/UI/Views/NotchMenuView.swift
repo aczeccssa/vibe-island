@@ -7,13 +7,15 @@
 
 import ApplicationServices
 import Combine
-import SwiftUI
+import os.log
 import ServiceManagement
 import Sparkle
+import SwiftUI
 
 // MARK: - NotchMenuView
 
 struct NotchMenuView: View {
+    private static let logger = Logger(subsystem: "com.claudeisland", category: "NotchMenu")
     @ObservedObject var viewModel: NotchViewModel
     @ObservedObject private var updateManager = UpdateManager.shared
     @ObservedObject private var screenSelector = ScreenSelector.shared
@@ -58,7 +60,7 @@ struct NotchMenuView: View {
                         launchAtLogin = true
                     }
                 } catch {
-                    print("Failed to toggle launch at login: \(error)")
+                    Self.logger.error("Failed to toggle launch at login: \(error.localizedDescription, privacy: .public)")
                 }
             }
 

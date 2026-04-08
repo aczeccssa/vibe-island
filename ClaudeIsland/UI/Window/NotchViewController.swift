@@ -106,7 +106,7 @@ private struct FixtureWindowRootView: View {
         Group {
             if let explicitChatSession = explicitChatSession {
                 ChatView(
-                    sessionId: explicitChatSession.sessionId,
+                    sessionId: explicitChatSession.sessionID,
                     initialSession: explicitChatSession,
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel
@@ -131,13 +131,13 @@ private struct FixtureWindowRootView: View {
         }
     }
 
-    private var explicitChatSession: SessionState? {
-        if case .chat(let session) = viewModel.contentType {
-            return session
+    private var explicitChatSession: ProjectedSessionViewState? {
+        if case .chat(let sessionID) = viewModel.contentType {
+            return sessionMonitor.instances.first(where: { $0.sessionID == sessionID })
         }
-        guard let sessionID = ProjectionCompatibilityStore.shared.fixtureBootSessionID else {
+        guard let sessionID = sessionMonitor.fixtureBootSessionID else {
             return nil
         }
-        return sessionMonitor.instances.first(where: { $0.sessionId == sessionID })
+        return sessionMonitor.instances.first(where: { $0.sessionID == sessionID })
     }
 }

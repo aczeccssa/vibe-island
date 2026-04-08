@@ -1,11 +1,13 @@
 import AppKit
 import IOKit
 import Mixpanel
+import os.log
 import Sparkle
 import SwiftUI
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let logger = Logger(subsystem: "com.claudeisland", category: "AppDelegate")
     private var windowManager: WindowManager?
     private var screenObserver: ScreenObserver?
     private var updateCheckTimer: Timer?
@@ -14,6 +16,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let updater: SPUUpdater
     private let userDriver: NotchUserDriver
     private let launchMode = ProjectionLaunchMode.current
+
+    private var isRunningTests: Bool {
+        if Foundation.ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return true
+        }
+
+        return Bundle.allBundles.contains { bundle in
+            bundle.bundlePath.hasSuffix(".xctest")
+        }
+    }
 
     var windowController: NotchWindowController? {
         windowManager?.windowController
@@ -30,22 +42,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         super.init()
         AppDelegate.shared = self
 
-        if launchMode.allowsExternalSideEffects {
+        if launchMode.allowsExternalSideEffects && !isRunningTests {
             do {
                 try updater.start()
             } catch {
-                print("Failed to start Sparkle updater: \(error)")
+                Self.logger.error("Failed to start Sparkle updater: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if !ensureSingleInstance() {
+        guard !isRunningTests else { return }
+
+        if !isRunningTests && !ensureSingleInstance() {
             NSApplication.shared.terminate(nil)
             return
         }
 
-        if launchMode.allowsExternalSideEffects {
+        if launchMode.allowsExternalSideEffects && !isRunningTests {
             Mixpanel.initialize(token: "49814c1436104ed108f3fc4735228496")
 
             let distinctId = getOrCreateDistinctId()
@@ -73,9 +87,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Mixpanel.mainInstance().flush()
         }
 
-        if launchMode.startsLiveIngress {
-            HookInstaller.installIfNeeded()
-            AgentEventCoordinator.shared.start()
+        if launchMode.startsLiveIngress && !isRunningTests {
+            Task {
+                await RuntimeOrchestrator.shared.start(mode: launchMode)
+            }
         }
         NSApplication.shared.setActivationPolicy(launchMode.isFixture ? .regular : .accessory)
 
@@ -92,7 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleScreenChange()
         }
 
-        if launchMode.allowsExternalSideEffects {
+        if launchMode.allowsExternalSideEffects && !isRunningTests {
             if updater.canCheckForUpdates {
                 updater.checkForUpdates()
             }
@@ -109,10 +124,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if launchMode.startsLiveIngress {
-            AgentEventCoordinator.shared.stop()
+        if launchMode.startsLiveIngress && !isRunningTests {
+            Task {
+                await RuntimeOrchestrator.shared.stop()
+            }
         }
-        Mixpanel.mainInstance().flush()
+        if !isRunningTests {
+            Mixpanel.mainInstance().flush()
+        }
         updateCheckTimer?.invalidate()
         screenObserver = nil
     }

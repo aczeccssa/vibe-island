@@ -8,9 +8,10 @@
 //
 
 import Foundation
+import SQLite3
 
 /// OpenAI Codex CLI agent implementation.
-struct CodexAgent: AIAgent {
+struct CodexAgent: HookInstallableAgent {
     let id: String = "codex"
     let name: String = "OpenAI Codex"
     let priority: Int = 1  // P0 - highest after Claude
@@ -211,64 +212,91 @@ struct CodexAgent: AIAgent {
     }
 
     func resolveConversation(sessionId: String?, cwd: String) -> ResolvedCodexConversation? {
+        let databasePath = NSString(string: "~/.codex/state_5.sqlite").expandingTildeInPath
+
         if let threadId = sessionId.flatMap(Self.threadId(fromSessionId:)) {
-            return queryConversation(whereClause: "id = '\(escapeSQL(threadId))'")
+            return queryConversation(
+                databasePath: databasePath,
+                sql: """
+                select id, rollout_path, title, updated_at, source
+                from threads
+                where id = ?
+                limit 1;
+                """,
+                bindings: [threadId]
+            )
         }
 
         if !cwd.isEmpty, cwd != "/" {
-            let escapedCwd = escapeSQL(cwd)
             if let conversation = queryConversation(
-                whereClause: "cwd = '\(escapedCwd)' and archived = 0",
-                orderBy: "updated_at desc"
+                databasePath: databasePath,
+                sql: """
+                select id, rollout_path, title, updated_at, source
+                from threads
+                where cwd = ? and archived = 0
+                order by updated_at desc
+                limit 1;
+                """,
+                bindings: [cwd]
             ) {
                 return conversation
             }
         }
 
         return queryConversation(
-            whereClause: "archived = 0",
-            orderBy: "updated_at desc"
+            databasePath: databasePath,
+            sql: """
+            select id, rollout_path, title, updated_at, source
+            from threads
+            where archived = 0
+            order by updated_at desc
+            limit 1;
+            """
         )
     }
 
     private func queryConversation(
-        whereClause: String,
-        orderBy: String = "updated_at desc"
+        databasePath: String,
+        sql: String,
+        bindings: [String] = []
     ) -> ResolvedCodexConversation? {
-        let expandedDbPath = NSString(string: "~/.codex/state_5.sqlite").expandingTildeInPath
-        let query = """
-        select id, rollout_path, title, updated_at, source
-        from threads
-        where \(whereClause)
-        order by \(orderBy)
-        limit 1;
-        """
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(databasePath, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let database else {
+            return nil
+        }
+        defer { sqlite3_close(database) }
 
-        guard let output = ProcessExecutor.shared.runSyncOrNil(
-            "/usr/bin/sqlite3",
-            arguments: [expandedDbPath, query]
-        )?.trimmingCharacters(in: .whitespacesAndNewlines),
-        !output.isEmpty else {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement else {
+            return nil
+        }
+        defer { sqlite3_finalize(statement) }
+
+        for (index, binding) in bindings.enumerated() {
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            guard sqlite3_bind_text(statement, Int32(index + 1), binding, -1, transient) == SQLITE_OK else {
+                return nil
+            }
+        }
+
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let idPointer = sqlite3_column_text(statement, 0),
+              let rolloutPathPointer = sqlite3_column_text(statement, 1),
+              let titlePointer = sqlite3_column_text(statement, 2),
+              let sourcePointer = sqlite3_column_text(statement, 4) else {
             return nil
         }
 
-        let parts = output.components(separatedBy: "|")
-        guard parts.count >= 5,
-              let updatedAtEpoch = TimeInterval(parts[3]) else {
-            return nil
-        }
-
+        let updatedAtEpoch = sqlite3_column_double(statement, 3)
         return ResolvedCodexConversation(
-            sessionId: "codex-thread-\(parts[0])",
-            rolloutPath: parts[1],
-            title: parts[2],
+            sessionId: "codex-thread-\(String(cString: idPointer))",
+            rolloutPath: String(cString: rolloutPathPointer),
+            title: String(cString: titlePointer),
             updatedAt: Date(timeIntervalSince1970: updatedAtEpoch),
-            source: parts[4]
+            source: String(cString: sourcePointer)
         )
-    }
-
-    private func escapeSQL(_ value: String) -> String {
-        value.replacingOccurrences(of: "'", with: "''")
     }
 
     private static func threadId(fromSessionId sessionId: String) -> String? {

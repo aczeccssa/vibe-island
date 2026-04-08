@@ -4,6 +4,21 @@ import Foundation
 enum CanonicalFixtures {
     static let baseDate = Date(timeIntervalSince1970: 1_710_000_000)
 
+    static func fixtureUUID(_ raw: String) -> UUID {
+        guard let uuid = UUID(uuidString: raw) else {
+            preconditionFailure("Invalid canonical fixture UUID: \(raw)")
+        }
+        return uuid
+    }
+
+    static func makeEvent(_ build: () throws -> CanonicalEventEnvelope) -> CanonicalEventEnvelope {
+        do {
+            return try build()
+        } catch {
+            preconditionFailure("Failed to build canonical fixture event: \(error)")
+        }
+    }
+
     static func agent(sourceKind: CanonicalAgentSourceKind = .hook) -> CanonicalAgentDescriptor {
         CanonicalAgentDescriptor(family: .claude, sourceKind: sourceKind)
     }
@@ -48,8 +63,9 @@ enum CanonicalFixtures {
     }
 
     static func conversationActiveEvent() -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000001"),
             type: .conversationActive,
             occurredAt: baseDate,
             observedAt: baseDate,
@@ -61,15 +77,17 @@ enum CanonicalFixtures {
                 CanonicalConversationActivePayload(status: .active, transition: .created)
             ),
             raw: raw(vendorEvent: "session_start")
-        )
+            )
+        }
     }
 
     static func messageDeltaEvent(
         messageID: String? = "message-1",
         delta: String = "Hello"
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000002"),
             type: .messageDelta,
             occurredAt: baseDate,
             observedAt: baseDate.addingTimeInterval(1),
@@ -89,15 +107,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "message_delta")
-        )
+            )
+        }
     }
 
     static func messageFinalEvent(
         messageID: String? = "message-1",
         text: String? = "Hello world"
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000003"),
             type: .messageFinal,
             occurredAt: baseDate.addingTimeInterval(2),
             observedAt: baseDate.addingTimeInterval(2),
@@ -118,15 +138,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "message_final")
-        )
+            )
+        }
     }
 
     static func toolStartedEvent(
         toolID: String? = "tool-1",
         conversationID: String = "conversation-1"
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000004"),
             type: .toolCallStarted,
             occurredAt: baseDate.addingTimeInterval(3),
             observedAt: baseDate.addingTimeInterval(3),
@@ -147,15 +169,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "tool_started")
-        )
+            )
+        }
     }
 
     static func toolCompletedEvent(
         toolID: String? = "tool-1",
         conversationID: String = "conversation-1"
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000005"),
             type: .toolCallCompleted,
             occurredAt: baseDate.addingTimeInterval(4),
             observedAt: baseDate.addingTimeInterval(4),
@@ -177,15 +201,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "tool_completed")
-        )
+            )
+        }
     }
 
     static func approvalRequestedEvent(
         approvalID: String = "approval-1",
         conversationID: String = "conversation-1"
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000006"),
             type: .approvalRequested,
             occurredAt: baseDate.addingTimeInterval(5),
             observedAt: baseDate.addingTimeInterval(5),
@@ -207,15 +233,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "approval_requested")
-        )
+            )
+        }
     }
 
     static func approvalResolvedEvent(
         approvalID: String = "approval-1",
         result: CanonicalApprovalResolutionResult = .accepted
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000007")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000007"),
             type: .approvalResolved,
             occurredAt: baseDate.addingTimeInterval(6),
             observedAt: baseDate.addingTimeInterval(6),
@@ -236,12 +264,14 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "approval_resolved")
-        )
+            )
+        }
     }
 
     static func choiceRequestedEvent(choiceID: String = "choice-1") -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000008")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000008"),
             type: .userChoiceRequested,
             occurredAt: baseDate.addingTimeInterval(7),
             observedAt: baseDate.addingTimeInterval(7),
@@ -262,12 +292,14 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "choice_requested")
-        )
+            )
+        }
     }
 
     static func choiceSubmittedEvent(choiceID: String = "choice-1") -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000009")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000009"),
             type: .userChoiceSubmitted,
             occurredAt: baseDate.addingTimeInterval(8),
             observedAt: baseDate.addingTimeInterval(8),
@@ -287,15 +319,17 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "choice_submitted")
-        )
+            )
+        }
     }
 
     static func choiceResolvedEvent(
         choiceID: String = "choice-1",
         result: CanonicalApprovalResolutionResult = .accepted
     ) -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000010")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000010"),
             type: .userChoiceResolved,
             occurredAt: baseDate.addingTimeInterval(9),
             observedAt: baseDate.addingTimeInterval(9),
@@ -314,12 +348,14 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "choice_resolved")
-        )
+            )
+        }
     }
 
     static func planUpdatedEvent(planID: String = "plan-1") -> CanonicalEventEnvelope {
-        try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "00000000-0000-0000-0000-000000000011")!,
+        makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: fixtureUUID("00000000-0000-0000-0000-000000000011"),
             type: .planUpdated,
             occurredAt: baseDate.addingTimeInterval(10),
             observedAt: baseDate.addingTimeInterval(10),
@@ -340,7 +376,8 @@ enum CanonicalFixtures {
                 )
             ),
             raw: raw(vendorEvent: "plan_updated")
-        )
+            )
+        }
     }
 
     static func allEvents() -> [CanonicalEventEnvelope] {
@@ -362,7 +399,7 @@ enum CanonicalFixtures {
     static func allCommands() -> [CanonicalCommandEnvelope] {
         [
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000001"),
                 issuedAt: baseDate,
                 conversationID: "conversation-1",
                 target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .approval, entityID: "approval-1"),
@@ -378,7 +415,7 @@ enum CanonicalFixtures {
                 )
             ),
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000002")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000002"),
                 issuedAt: baseDate,
                 conversationID: "conversation-choice",
                 target: CanonicalCommandTarget(adapterID: .codexCLI, entityType: .choice, entityID: "choice-1"),
@@ -394,7 +431,7 @@ enum CanonicalFixtures {
                 )
             ),
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000003")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000003"),
                 issuedAt: baseDate,
                 conversationID: "conversation-1",
                 target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .session, entityID: "conversation-1"),
@@ -404,7 +441,7 @@ enum CanonicalFixtures {
                 payload: .sessionFocus(CanonicalSessionCommandPayload(reason: "Focus"))
             ),
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000004")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000004"),
                 issuedAt: baseDate,
                 conversationID: "conversation-1",
                 target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .session, entityID: "conversation-1"),
@@ -414,7 +451,7 @@ enum CanonicalFixtures {
                 payload: .sessionArchive(CanonicalSessionCommandPayload(reason: "Archive"))
             ),
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000005")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000005"),
                 issuedAt: baseDate,
                 conversationID: "conversation-1",
                 target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .session, entityID: "conversation-1"),
@@ -424,7 +461,7 @@ enum CanonicalFixtures {
                 payload: .sessionInterrupt(CanonicalSessionCommandPayload(reason: "Interrupt"))
             ),
             CanonicalCommandEnvelope(
-                commandID: UUID(uuidString: "10000000-0000-0000-0000-000000000006")!,
+                commandID: fixtureUUID("10000000-0000-0000-0000-000000000006"),
                 issuedAt: baseDate,
                 conversationID: "conversation-1",
                 target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .session, entityID: "conversation-1"),

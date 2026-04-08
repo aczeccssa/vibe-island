@@ -6,10 +6,12 @@
 //
 
 import Foundation
+import os.log
 
 typealias CanonicalCommandHandler = @Sendable (CanonicalCommandEnvelope) async -> CanonicalCommandDispatchResult
 
 actor CommandRouter {
+    private static let logger = Logger(subsystem: "com.claudeisland", category: "CommandRouter")
     private var handlers: [RuntimeAdapterID: CanonicalCommandHandler] = [:]
 
     func registerHandler(
@@ -25,6 +27,9 @@ actor CommandRouter {
 
     func dispatch(_ command: CanonicalCommandEnvelope) async -> CanonicalCommandDispatchResult {
         guard let handler = handlers[command.target.adapterID] else {
+            Self.logger.warning(
+                "No command handler registered for adapter \(command.target.adapterID.rawValue, privacy: .public) command \(command.type.rawValue, privacy: .public)"
+            )
             return CanonicalCommandDispatchResult(
                 commandID: command.commandID,
                 adapterID: command.target.adapterID,

@@ -28,13 +28,13 @@ enum NotchOpenReason {
 enum NotchContentType: Equatable {
     case instances
     case menu
-    case chat(SessionState)
+    case chat(String)
 
     var id: String {
         switch self {
         case .instances: return "instances"
         case .menu: return "menu"
-        case .chat(let session): return "chat-\(session.sessionId)"
+        case .chat(let sessionID): return "chat-\(sessionID)"
         }
     }
 }
@@ -47,8 +47,8 @@ class NotchViewModel: ObservableObject {
     @Published var openReason: NotchOpenReason = .unknown
     @Published var contentType: NotchContentType = .instances
     @Published var isHovering: Bool = false
-    @Published var interactionPopQueue: [InteractionPopState] = []
-    @Published var activeInteractionPop: InteractionPopState?
+    @Published var interactionPopQueue: [ProjectedInteractionPopState] = []
+    @Published var activeInteractionPop: ProjectedInteractionPopState?
     @Published var pendingExpandedSessionId: String?
     @Published var pendingScrollToSessionId: String?
     @Published private(set) var interactionQuestionProgress: [String: Int] = [:]
@@ -159,7 +159,7 @@ class NotchViewModel: ObservableObject {
     }
 
     /// The chat session we're viewing (persists across close/open)
-    private var currentChatSession: SessionState?
+    private var currentChatSessionID: String?
 
     private func handleMouseMove(_ location: CGPoint) {
         let inNotch = geometry.isPointInNotch(location)
@@ -249,25 +249,25 @@ class NotchViewModel: ObservableObject {
 
         // Don't restore chat on notification - show instances list instead
         if reason == .notification {
-            currentChatSession = nil
+            currentChatSessionID = nil
             return
         }
 
         // Restore chat session if we had one open before
-        if let chatSession = currentChatSession {
+        if let chatSessionID = currentChatSessionID {
             // Avoid unnecessary updates if already showing this chat
-            if case .chat(let current) = contentType, current.sessionId == chatSession.sessionId {
+            if case .chat(let current) = contentType, current == chatSessionID {
                 return
             }
-            contentType = .chat(chatSession)
+            contentType = .chat(chatSessionID)
         }
     }
 
     func notchClose() {
         dismissActiveInteractionPop(advanceQueue: false)
         // Save chat session before closing if in chat mode
-        if case .chat(let session) = contentType {
-            currentChatSession = session
+        if case .chat(let sessionID) = contentType {
+            currentChatSessionID = sessionID
         }
         status = .closed
         contentType = .instances
@@ -287,42 +287,42 @@ class NotchViewModel: ObservableObject {
         contentType = contentType == .menu ? .instances : .menu
     }
 
-    func showChat(for session: SessionState) {
+    func showChat(for sessionID: String) {
         // Avoid unnecessary updates if already showing this chat
-        if case .chat(let current) = contentType, current.sessionId == session.sessionId {
+        if case .chat(let current) = contentType, current == sessionID {
             return
         }
-        contentType = .chat(session)
+        contentType = .chat(sessionID)
     }
 
     /// Go back to instances list and clear saved chat state
     func exitChat() {
-        currentChatSession = nil
+        currentChatSessionID = nil
         contentType = .instances
     }
 
     func enqueueInteractionPop(
-        for sessionId: String,
-        interaction: SessionInteractionRequest,
+        for sessionID: String,
+        prompt: ProjectedPromptState,
         duration: TimeInterval = defaultInteractionPopDuration
     ) {
-        let popState = InteractionPopState(
-            sessionId: sessionId,
-            interaction: interaction,
+        let popState = ProjectedInteractionPopState(
+            sessionID: sessionID,
+            prompt: prompt,
             createdAt: Date()
         )
 
-        let interactionId = interaction.id
-        if activeInteractionPop?.interaction.id == interactionId {
+        let promptID = prompt.id
+        if activeInteractionPop?.prompt.id == promptID {
             return
         }
-        if interactionPopQueue.contains(where: { $0.interaction.id == interactionId }) {
+        if interactionPopQueue.contains(where: { $0.prompt.id == promptID }) {
             return
         }
 
         interactionPopQueue.append(popState)
-        pendingExpandedSessionId = sessionId
-        pendingScrollToSessionId = sessionId
+        pendingExpandedSessionId = sessionID
+        pendingScrollToSessionId = sessionID
 
         if activeInteractionPop == nil {
             advanceInteractionPopQueue(duration: duration)
@@ -377,14 +377,14 @@ class NotchViewModel: ObservableObject {
     }
 
     func clearInteraction(for sessionId: String, interactionId: String? = nil) {
-        if activeInteractionPop?.sessionId == sessionId,
-           interactionId == nil || activeInteractionPop?.interaction.id == interactionId {
+        if activeInteractionPop?.sessionID == sessionId,
+           interactionId == nil || activeInteractionPop?.prompt.id == interactionId {
             dismissActiveInteractionPop()
         }
 
         interactionPopQueue.removeAll { popState in
-            popState.sessionId == sessionId &&
-                (interactionId == nil || popState.interaction.id == interactionId)
+            popState.sessionID == sessionId &&
+                (interactionId == nil || popState.prompt.id == interactionId)
         }
 
         if pendingExpandedSessionId == sessionId {
@@ -401,11 +401,11 @@ class NotchViewModel: ObservableObject {
 
     func pruneInteractionQueue(validInteractionIds: Set<String>) {
         if let activeInteractionPop,
-           !validInteractionIds.contains(activeInteractionPop.interaction.id) {
+           !validInteractionIds.contains(activeInteractionPop.prompt.id) {
             dismissActiveInteractionPop()
         }
 
-        interactionPopQueue.removeAll { !validInteractionIds.contains($0.interaction.id) }
+        interactionPopQueue.removeAll { !validInteractionIds.contains($0.prompt.id) }
         interactionQuestionProgress = interactionQuestionProgress.filter { validInteractionIds.contains($0.key) }
     }
 
