@@ -69,7 +69,7 @@ final class CanonicalFoundationTests: XCTestCase {
         let bus = CanonicalEventBus()
         let first = CanonicalFixtures.messageDeltaEvent(delta: "Hello")
         let duplicate = try CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "20000000-0000-0000-0000-000000000001")!,
+            eventID: CanonicalFixtures.fixtureUUID("20000000-0000-0000-0000-000000000001"),
             type: first.type,
             occurredAt: first.occurredAt,
             observedAt: first.observedAt.addingTimeInterval(30),
@@ -113,6 +113,83 @@ final class CanonicalFoundationTests: XCTestCase {
 
         let received = await collector.value
         XCTAssertEqual(received.map(\.eventID), [first.eventID, second.eventID])
+    }
+
+    func testEventBusBoundsFingerprintRetentionPerLogicalKey() async throws {
+        let bus = CanonicalEventBus()
+        let baseline = CanonicalFixtures.messageDeltaEvent(delta: "baseline")
+        let baseDate = CanonicalFixtures.baseDate
+
+        for index in 0..<80 {
+            let event = try CanonicalEventEnvelope(
+                eventID: UUID(),
+                type: .messageDelta,
+                occurredAt: baseDate.addingTimeInterval(TimeInterval(index)),
+                observedAt: baseDate.addingTimeInterval(TimeInterval(index)),
+                sourceSeq: baseline.sourceSeq,
+                causationID: baseline.causationID,
+                supersedesEventID: baseline.supersedesEventID,
+                adapterID: baseline.adapterID,
+                agent: baseline.agent,
+                conversation: baseline.conversation,
+                turn: baseline.turn,
+                entity: baseline.entity,
+                payload: .messageDelta(
+                    CanonicalMessageDeltaPayload(
+                        message: CanonicalMessageDelta(
+                            id: baseline.entity.messageID,
+                            role: .assistant,
+                            format: .markdown,
+                            delta: "delta-\(index)"
+                        )
+                    )
+                ),
+                raw: CanonicalRawEvent(
+                    vendorEvent: "message_delta",
+                    vendorPayload: ["payload": AnyCodable("delta-\(index)")]
+                )
+            )
+            _ = try await bus.publish(event)
+        }
+
+        let fingerprintCount = await bus.fingerprintCount(for: baseline)
+        XCTAssertEqual(fingerprintCount, 64)
+    }
+
+    func testEventBusBoundsDedupeKeyCardinality() async throws {
+        let bus = CanonicalEventBus()
+
+        for index in 0..<2100 {
+            let event = try CanonicalEventEnvelope(
+                eventID: UUID(),
+                type: .messageDelta,
+                occurredAt: CanonicalFixtures.baseDate.addingTimeInterval(TimeInterval(index)),
+                observedAt: CanonicalFixtures.baseDate.addingTimeInterval(TimeInterval(index)),
+                adapterID: .claudeCode,
+                agent: CanonicalFixtures.agent(),
+                conversation: CanonicalFixtures.conversation(id: "conversation-\(index)"),
+                turn: CanonicalFixtures.turn(),
+                entity: CanonicalFixtures.entity(messageID: "message-\(index)"),
+                payload: .messageDelta(
+                    CanonicalMessageDeltaPayload(
+                        message: CanonicalMessageDelta(
+                            id: "message-\(index)",
+                            role: .assistant,
+                            format: .markdown,
+                            delta: "delta-\(index)"
+                        )
+                    )
+                ),
+                raw: CanonicalRawEvent(
+                    vendorEvent: "message_delta",
+                    vendorPayload: ["payload": AnyCodable("delta-\(index)")]
+                )
+            )
+            _ = try await bus.publish(event)
+        }
+
+        let dedupeKeyCount = await bus.dedupeKeyCount()
+        XCTAssertEqual(dedupeKeyCount, 2048)
     }
 
     func testProjectionStoreMessageDeltaThenFinalSupersedesAccumulatedText() async {
@@ -187,7 +264,7 @@ final class CanonicalFoundationTests: XCTestCase {
         await store.apply(requested)
 
         let command = CanonicalCommandEnvelope(
-            commandID: UUID(uuidString: "30000000-0000-0000-0000-000000000001")!,
+            commandID: CanonicalFixtures.fixtureUUID("30000000-0000-0000-0000-000000000001"),
             issuedAt: CanonicalFixtures.baseDate,
             conversationID: requested.conversation.id,
             target: CanonicalCommandTarget(
@@ -280,8 +357,9 @@ final class CanonicalFoundationTests: XCTestCase {
         let store = SessionProjectionStore()
         await store.apply(CanonicalFixtures.planUpdatedEvent(planID: "plan-merge"))
 
-        let secondPlan = try! CanonicalEventEnvelope(
-            eventID: UUID(uuidString: "40000000-0000-0000-0000-000000000001")!,
+        let secondPlan = CanonicalFixtures.makeEvent {
+            try CanonicalEventEnvelope(
+            eventID: CanonicalFixtures.fixtureUUID("40000000-0000-0000-0000-000000000001"),
             type: .planUpdated,
             occurredAt: CanonicalFixtures.baseDate.addingTimeInterval(30),
             observedAt: CanonicalFixtures.baseDate.addingTimeInterval(30),
@@ -303,7 +381,8 @@ final class CanonicalFoundationTests: XCTestCase {
                 )
             ),
             raw: CanonicalFixtures.raw(vendorEvent: "plan_updated")
-        )
+            )
+        }
         await store.apply(secondPlan)
 
         let snapshot = await store.snapshot()
@@ -326,6 +405,147 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertEqual(compatibility.paritySnapshot.chatItemCounts["conversation-1"], 3) // 1 message + 1 tool + 1 synthetic interaction item
         XCTAssertEqual(compatibility.paritySnapshot.inProgressToolCounts["conversation-1"], 1)
         XCTAssertTrue(compatibility.paritySnapshot.attentionSessionIDs.contains("conversation-1"))
+    }
+
+    func testProjectionBootstrapArchiveSessionMarksCanonicalConversationArchived() async {
+        await ProjectionBootstrap.shared.stop()
+        await ProjectionBootstrap.shared.start(mode: .live)
+
+        await ProjectionBootstrap.shared.handleProcessDetected(
+            sessionID: "conversation-archived",
+            cwd: "/tmp/archive-status",
+            agentID: "codex",
+            pid: nil,
+            tty: nil
+        )
+
+        await ProjectionBootstrap.shared.archiveSession("conversation-archived")
+
+        let snapshot = await ProjectionBootstrap.shared.projectionStore.snapshot()
+        let uiSessions = await ProjectionBootstrap.shared.uiSessions()
+
+        XCTAssertEqual(snapshot.conversations["conversation-archived"]?.status, .archived)
+        XCTAssertFalse(uiSessions.contains(where: { $0.sessionID == "conversation-archived" }))
+
+        await ProjectionBootstrap.shared.stop()
+    }
+
+    func testRuntimeCutoverDefaultsPreserveCurrentLiveBehavior() {
+        let flags = EventBusFeatureFlags(environment: [:], defaults: UserDefaults(suiteName: #function)!)
+        let configuration = RuntimeOrchestrator.liveCutoverConfiguration(for: .live, flags: flags)
+
+        XCTAssertEqual(configuration.activeAdapterIDs, Set(RuntimeAdapterID.allCases))
+        XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
+    }
+
+    func testRuntimeCutoverHonorsExplicitAdapterAndProjectionFlags() {
+        let flags = EventBusFeatureFlags(
+            environment: [
+                "VIBE_ISLAND_ENABLE_CODEX_CLI_ADAPTER_PATH": "true",
+                "VIBE_ISLAND_ENABLE_CANONICAL_PROJECTION_PATH": "true"
+            ],
+            defaults: UserDefaults(suiteName: #function)!
+        )
+        let configuration = RuntimeOrchestrator.liveCutoverConfiguration(for: .live, flags: flags)
+
+        XCTAssertEqual(configuration.activeAdapterIDs, [.codexCLI])
+        XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
+    }
+
+    func testRuntimeCutoverCanonicalProjectionFlagAlonePreservesAllAdapters() {
+        let flags = EventBusFeatureFlags(
+            environment: [
+                "VIBE_ISLAND_ENABLE_CANONICAL_PROJECTION_PATH": "true"
+            ],
+            defaults: UserDefaults(suiteName: #function)!
+        )
+        let configuration = RuntimeOrchestrator.liveCutoverConfiguration(for: .live, flags: flags)
+
+        XCTAssertEqual(configuration.activeAdapterIDs, Set(RuntimeAdapterID.allCases))
+        XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
+    }
+
+    func testCodexDetectRunningSessionsPreservesTTYForCLIProcesses() {
+        let agent = CodexAgent()
+        let output = """
+          PID COMM WCHAN
+          101 codex - 
+        """
+        let processTree = [
+            101: ProcessInfo(pid: 101, ppid: 1, command: "codex", tty: "ttys009")
+        ]
+
+        let sessions = agent.parseRunningSessions(
+            from: output,
+            processTree: processTree,
+            executablePathForPID: { pid in
+                switch pid {
+                case 101:
+                    return "/Users/test/.codex/bin/codex"
+                default:
+                    return nil
+                }
+            },
+            workingDirectoryForPID: { pid in
+                switch pid {
+                case 101:
+                    return "/tmp/codex-cli"
+                default:
+                    return nil
+                }
+            }
+        )
+
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertEqual(sessions.first?.variant, .cli)
+        XCTAssertEqual(sessions.first?.tty, "ttys009")
+    }
+
+    func testProjectionBootstrapProcessDetectionPreservesCodexAppIdentity() async {
+        await ProjectionBootstrap.shared.stop()
+        await ProjectionBootstrap.shared.start(mode: .live)
+
+        await ProjectionBootstrap.shared.handleProcessDetected(
+            sessionID: "codex-app-session",
+            cwd: "/tmp/codex-app-session",
+            agentID: "codex-app",
+            pid: 42,
+            tty: nil
+        )
+
+        let snapshot = await ProjectionBootstrap.shared.projectionStore.snapshot()
+        let session = await ProjectionBootstrap.shared.uiSession(id: "codex-app-session")
+
+        XCTAssertEqual(snapshot.conversations["codex-app-session"]?.adapterID, .codexApp)
+        XCTAssertEqual(snapshot.conversations["codex-app-session"]?.familyID, .codex)
+        XCTAssertEqual(session?.adapterID, .codexApp)
+        XCTAssertEqual(session?.agentID, "codex-app")
+
+        await ProjectionBootstrap.shared.stop()
+    }
+
+    func testProjectionBootstrapResolvedTmuxStateReusesStableSessionIdentity() async {
+        let metadata = ProjectionRuntimeMetadata(
+            sessionID: "tmux-stable",
+            agentID: "claude",
+            runtimeIdentity: RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .cli),
+            cwd: "/tmp/tmux-stable",
+            pid: 123,
+            tty: "ttys001",
+            isInTmux: true,
+            phase: .processing,
+            activePrompt: nil,
+            lastActivity: CanonicalFixtures.baseDate,
+            createdAt: CanonicalFixtures.baseDate
+        )
+
+        let state = await ProjectionBootstrap.shared.resolvedTmuxState(
+            pid: 123,
+            tty: "ttys001",
+            existing: metadata
+        )
+
+        XCTAssertTrue(state)
     }
 
     func testCompatibilityProjectorUsesToolOrInteractionIDsAndBinaryPendingCount() async {
@@ -394,7 +614,7 @@ final class CanonicalFoundationTests: XCTestCase {
         await store.apply(CanonicalFixtures.approvalRequestedEvent(approvalID: "approval-ui"))
 
         let command = CanonicalCommandEnvelope(
-            commandID: UUID(uuidString: "50000000-0000-0000-0000-000000000001")!,
+            commandID: CanonicalFixtures.fixtureUUID("50000000-0000-0000-0000-000000000001"),
             issuedAt: CanonicalFixtures.baseDate,
             conversationID: "conversation-1",
             target: CanonicalCommandTarget(adapterID: .claudeCode, entityType: .session, entityID: "conversation-1"),
@@ -579,12 +799,12 @@ final class CanonicalFoundationTests: XCTestCase {
             )
         )
 
-        let sessions = await MainActor.run { ProjectionCompatibilityStore.shared.sessions }
-        let fixtureBootSessionID = await MainActor.run { ProjectionCompatibilityStore.shared.fixtureBootSessionID }
+        let sessions = await ProjectionBootstrap.shared.uiSessions()
+        let fixtureBootSessionID = await ProjectionBootstrap.shared.fixtureBootSessionID()
 
         XCTAssertEqual(sessions.count, 1)
-        XCTAssertEqual(sessions.first?.sessionId, "conversation-fixture")
-        XCTAssertEqual(sessions.first?.chatItems.count, 2)
+        XCTAssertEqual(sessions.first?.sessionID, "conversation-fixture")
+        XCTAssertEqual(sessions.first?.timeline.count, 2)
         XCTAssertEqual(sessions.first?.displayTitle, "Fixture Session")
         XCTAssertEqual(fixtureBootSessionID, "conversation-fixture")
     }

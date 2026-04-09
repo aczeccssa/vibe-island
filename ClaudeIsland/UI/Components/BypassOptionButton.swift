@@ -12,7 +12,7 @@ import SwiftUI
 /// First click: expands to full width, shows confirmation prompt.
 /// Second click: confirms and executes the bypass action.
 struct BypassOptionButton: View {
-    let option: InteractionOption
+    let option: ProjectedInteractionOptionState
     let onConfirm: () -> Void
     var fontSize: CGFloat = 11
     var verticalPadding: CGFloat = 8

@@ -144,7 +144,7 @@ actor SessionInteractionSubmitter {
         }
 
         return await MainActor.run {
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            app.activate(options: [.activateAllWindows])
         }
     }
 

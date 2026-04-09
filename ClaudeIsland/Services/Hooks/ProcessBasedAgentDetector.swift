@@ -2,7 +2,7 @@
 //  ProcessBasedAgentDetector.swift
 //  ClaudeIsland
 //
-//  Process-based discovery and liveness monitoring for agent sessions.
+//  Phase 2 session discovery worker owned by RuntimeOrchestrator.
 //
 
 import Darwin
@@ -12,14 +12,33 @@ import os.log
 actor ProcessBasedAgentDetector {
     static let shared = ProcessBasedAgentDetector()
 
+    typealias TrackedSessionsProvider = @Sendable () async -> [RuntimeTrackedSession]
+    typealias SessionDiscoveredHandler = @Sendable (RuntimeDiscoveredSession) async -> Void
+    typealias SessionEndedHandler = @Sendable (String) async -> Void
+
     private let logger = Logger(subsystem: "com.claudeisland", category: "ProcessDetector")
     private let pollIntervalSeconds: UInt64 = 2
     private var pollTask: Task<Void, Never>?
+    private var discoveryPlanes: [any RuntimeSessionDiscoveryPlane] = []
+    private var trackedSessionsProvider: TrackedSessionsProvider?
+    private var onSessionDiscovered: SessionDiscoveredHandler?
+    private var onSessionEnded: SessionEndedHandler?
 
     private init() {}
 
-    func start() {
+    func start(
+        discoveryPlanes: [any RuntimeSessionDiscoveryPlane],
+        trackedSessionsProvider: @escaping TrackedSessionsProvider,
+        onSessionDiscovered: @escaping SessionDiscoveredHandler,
+        onSessionEnded: @escaping SessionEndedHandler
+    ) {
         guard pollTask == nil else { return }
+
+        self.discoveryPlanes = discoveryPlanes
+        self.trackedSessionsProvider = trackedSessionsProvider
+        self.onSessionDiscovered = onSessionDiscovered
+        self.onSessionEnded = onSessionEnded
+
         logger.info("Process liveness detector started")
 
         pollTask = Task { [weak self] in
@@ -33,88 +52,43 @@ actor ProcessBasedAgentDetector {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        discoveryPlanes = []
+        trackedSessionsProvider = nil
+        onSessionDiscovered = nil
+        onSessionEnded = nil
         logger.info("Process liveness detector stopped")
     }
 
     private func poll() async {
         await discoverRunningSessions()
 
-        let sessions = await SessionStore.shared.allSessions()
-        for session in sessions {
+        guard let trackedSessionsProvider, let onSessionEnded else { return }
+        let trackedSessions = await trackedSessionsProvider()
+        for session in trackedSessions {
             guard let pid = session.pid else { continue }
             guard !isProcessAlive(pid) else { continue }
-
-            logger.info(
-                "Hook-backed session process ended: \(session.agentId, privacy: .public) pid=\(pid, privacy: .public)"
-            )
-            await SessionStore.shared.process(.processSessionEnded(sessionId: session.sessionId))
-            await ProjectionBootstrap.shared.handleProcessEnded(sessionID: session.sessionId)
+            logger.info("Tracked session process ended: \(session.sessionID, privacy: .public) pid=\(pid, privacy: .public)")
+            await onSessionEnded(session.sessionID)
         }
     }
 
     private func discoverRunningSessions() async {
-        let processTree = ProcessTreeBuilder.shared.buildTree()
-        let currentSessions = await SessionStore.shared.allSessions()
-        let currentSessionsById = Dictionary(uniqueKeysWithValues: currentSessions.map { ($0.sessionId, $0) })
+        guard let onSessionDiscovered else { return }
+        let trackedSessions = await trackedSessionsProvider?() ?? []
+        let trackedBySessionID = Dictionary(uniqueKeysWithValues: trackedSessions.map { ($0.sessionID, $0) })
 
-        var detectedSessions: [(agentId: String, pid: Int, cwd: String, sessionId: String, runtimeIdentity: RuntimeIdentity)] = []
-
-        if AppSettings.isAgentEnabled("codex") {
-            detectedSessions.append(
-                contentsOf: CodexAgent().detectRunningSessions().map {
-                    (
-                        agentId: "codex",
-                        pid: $0.pid,
-                        cwd: $0.cwd,
-                        sessionId: $0.sessionId,
-                        runtimeIdentity: $0.variant.runtimeIdentity
-                    )
+        for plane in discoveryPlanes {
+            let discovered = await plane.discoverSessions()
+            for session in discovered where !session.cwd.isEmpty {
+                if let tracked = trackedBySessionID[session.sessionID],
+                   tracked.pid == session.pid {
+                    continue
                 }
-            )
-        }
-
-        if AppSettings.isAgentEnabled("gemini") {
-            detectedSessions.append(
-                contentsOf: GeminiCLIAgent().detectRunningSessions().map {
-                    (
-                        agentId: "gemini",
-                        pid: $0.pid,
-                        cwd: $0.cwd,
-                        sessionId: $0.sessionId,
-                        runtimeIdentity: RuntimeIdentity.fromLegacyAgentID("gemini")!
-                    )
-                }
-            )
-        }
-
-        for detected in detectedSessions {
-            guard !detected.cwd.isEmpty else { continue }
-
-            let existing = currentSessionsById[detected.sessionId]
-            if existing?.pid == detected.pid, existing?.cwd == detected.cwd {
-                continue
-            }
-
-            let tty = processTree[detected.pid]?.tty.map { "/dev/\($0)" }
-            logger.debug(
-                "Discovered running session: legacy=\(detected.agentId, privacy: .public) adapter=\(detected.runtimeIdentity.adapterID.rawValue, privacy: .public) pid=\(detected.pid, privacy: .public) session=\(detected.sessionId, privacy: .public)"
-            )
-            await SessionStore.shared.process(
-                .processDetected(
-                    sessionId: detected.sessionId,
-                    cwd: detected.cwd,
-                    agentId: detected.agentId,
-                    pid: detected.pid,
-                    tty: tty
+                logger.debug(
+                    "Discovered runtime session: adapter=\(session.adapterID.rawValue, privacy: .public) pid=\(String(session.pid ?? 0), privacy: .public) session=\(session.sessionID, privacy: .public)"
                 )
-            )
-            await ProjectionBootstrap.shared.handleProcessDetected(
-                sessionID: detected.sessionId,
-                cwd: detected.cwd,
-                agentID: detected.agentId,
-                pid: detected.pid,
-                tty: tty
-            )
+                await onSessionDiscovered(session)
+            }
         }
     }
 

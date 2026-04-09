@@ -9,8 +9,6 @@
 import Foundation
 
 struct EventBusFeatureFlags: Sendable {
-    static let shared = EventBusFeatureFlags()
-
     let enableClaudeCodeAdapterPath: Bool
     let enableCodexCLIAdapterPath: Bool
     let enableCodexAppAdapterPath: Bool
@@ -76,6 +74,15 @@ struct EventBusFeatureFlags: Sendable {
 
     static func snapshot() -> EventBusFeatureFlags {
         EventBusFeatureFlags()
+    }
+
+    var hasExplicitLivePathSelection: Bool {
+        enableCanonicalProjectionPath
+        || enableClaudeCodeAdapterPath
+        || enableCodexCLIAdapterPath
+        || enableCodexAppAdapterPath
+        || enableGeminiCLIAdapterPath
+        || enableOpencodeAdapterPath
     }
 
     private static func readFlag(

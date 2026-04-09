@@ -37,6 +37,14 @@ actor TmuxController {
         await ToolApprovalHandler.shared.reject(target: target, message: message)
     }
 
+    func interrupt(target: TmuxTarget) async -> Bool {
+        await ToolApprovalHandler.shared.interrupt(target: target)
+    }
+
+    func clearSurface(target: TmuxTarget) async -> Bool {
+        await ToolApprovalHandler.shared.clearSurface(target: target)
+    }
+
     func switchToPane(target: TmuxTarget) async -> Bool {
         guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else {
             return false

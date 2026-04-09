@@ -9,7 +9,7 @@
 import Foundation
 
 /// Google Gemini CLI agent implementation.
-struct GeminiCLIAgent: AIAgent {
+struct GeminiCLIAgent: HookInstallableAgent {
     let id: String = "gemini"
     let name: String = "Google Gemini CLI"
     let priority: Int = 2  // P1 - second priority

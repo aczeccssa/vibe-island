@@ -8,6 +8,264 @@
 import Combine
 import Foundation
 
+enum ProjectedSessionRuntimePhase: String, Equatable, Sendable {
+    case idle
+    case processing
+    case compacting
+    case waitingForApproval = "waiting_for_approval"
+    case waitingForInput = "waiting_for_input"
+    case ended
+
+    var needsAttention: Bool {
+        switch self {
+        case .waitingForApproval, .waitingForInput:
+            return true
+        case .idle, .processing, .compacting, .ended:
+            return false
+        }
+    }
+
+    var isWaitingForApproval: Bool { self == .waitingForApproval }
+    var isProcessingLike: Bool { self == .processing || self == .compacting }
+}
+
+enum ProjectedInteractionOptionRole: String, Equatable, Sendable {
+    case primary
+    case secondary
+    case destructive
+    case bypass
+}
+
+enum ProjectedPromptKind: String, Equatable, Sendable {
+    case approval
+    case choice
+}
+
+enum ProjectedPromptResponseCapability: String, Equatable, Sendable {
+    case nativeHookAvailable = "native_hook_available"
+    case keyboardFallbackAvailable = "keyboard_fallback_available"
+    case directTextAvailable = "direct_text_available"
+    case detectOnly = "detect_only"
+}
+
+enum ProjectedPromptSubmissionEncoding: String, Equatable, Sendable {
+    case optionValue = "option_value"
+    case optionLabel = "option_label"
+}
+
+enum ProjectedPromptProgrammaticStrategy: String, Equatable, Sendable {
+    case none
+    case claudeAskUserQuestion = "claude_ask_user_question"
+}
+
+struct ProjectedInteractionOptionState: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let submissionValue: String
+    let detail: String?
+    let role: ProjectedInteractionOptionRole
+}
+
+struct ProjectedInteractionQuestionState: Identifiable, Equatable, Sendable {
+    let id: String
+    let header: String?
+    let question: String
+    let options: [ProjectedInteractionOptionState]
+}
+
+struct ProjectedPromptSelection: Equatable, Sendable {
+    let questionID: String
+    let option: ProjectedInteractionOptionState
+}
+
+struct ProjectedPromptState: Identifiable, Equatable, Sendable {
+    let id: String
+    let sessionID: String
+    let toolUseID: String?
+    let toolName: String?
+    let toolInputPreview: String?
+    let sourceAgentID: String
+    let kind: ProjectedPromptKind
+    let title: String
+    let questions: [ProjectedInteractionQuestionState]
+    let preferredOptionID: String?
+    let createdAt: Date
+    let responseCapability: ProjectedPromptResponseCapability
+    let submissionEncoding: ProjectedPromptSubmissionEncoding
+    let programmaticStrategy: ProjectedPromptProgrammaticStrategy
+    let sourceToolInputJSON: String?
+
+    var question: String {
+        questions.first?.question ?? ""
+    }
+
+    var options: [ProjectedInteractionOptionState] {
+        questions.first?.options ?? []
+    }
+
+    var isMultiQuestion: Bool {
+        questions.count > 1
+    }
+
+    var canSubmitDirectly: Bool {
+        responseCapability != .detectOnly
+    }
+
+    func commandValue(for selections: [ProjectedPromptSelection]) -> [String: Any]? {
+        guard !selections.isEmpty else { return nil }
+
+        switch programmaticStrategy {
+        case .claudeAskUserQuestion:
+            return claudeAskUserQuestionValue(for: selections)
+        case .none:
+            return defaultProgrammaticValue(for: selections)
+        }
+    }
+
+    private func claudeAskUserQuestionValue(for selections: [ProjectedPromptSelection]) -> [String: Any]? {
+        let selectionsByQuestionID = Dictionary(uniqueKeysWithValues: selections.map { ($0.questionID, $0.option) })
+        let questionsByID = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, $0) })
+        var updatedInput = decodedToolInputPayload() ?? serializedQuestionsPayload()
+        var answers: [String: String] = [:]
+
+        for (questionID, option) in selectionsByQuestionID {
+            guard let question = questionsByID[questionID] else { continue }
+            answers[question.question] = option.label
+        }
+
+        guard !answers.isEmpty else { return nil }
+        updatedInput["answers"] = answers
+        return updatedInput
+    }
+
+    private func defaultProgrammaticValue(for selections: [ProjectedPromptSelection]) -> [String: Any]? {
+        let selectionsByQuestionID = Dictionary(uniqueKeysWithValues: selections.map { ($0.questionID, $0.option) })
+
+        switch sourceAgentID {
+        case "codex":
+            let answers = questions.reduce(into: [String: Any]()) { partialResult, question in
+                guard let option = selectionsByQuestionID[question.id] else { return }
+                partialResult[question.id] = [
+                    "answers": [
+                        encodedAnswerValue(for: option)
+                    ]
+                ]
+            }
+            return answers.isEmpty ? nil : ["answers": answers]
+
+        default:
+            let orderedAnswers = questions.compactMap { question -> String? in
+                guard let option = selectionsByQuestionID[question.id] else { return nil }
+                return encodedAnswerValue(for: option)
+            }
+            return orderedAnswers.isEmpty ? nil : ["answers": orderedAnswers]
+        }
+    }
+
+    private func encodedAnswerValue(for option: ProjectedInteractionOptionState) -> String {
+        switch submissionEncoding {
+        case .optionValue:
+            return option.submissionValue
+        case .optionLabel:
+            return option.label
+        }
+    }
+
+    private func decodedToolInputPayload() -> [String: Any]? {
+        guard let sourceToolInputJSON,
+              let data = sourceToolInputJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        return json
+    }
+
+    private func serializedQuestionsPayload() -> [String: Any] {
+        [
+            "questions": questions.map { question in
+                var result: [String: Any] = [
+                    "id": question.id,
+                    "question": question.question,
+                    "multiSelect": false,
+                    "options": question.options.map { option in
+                        var optionResult: [String: Any] = ["label": option.label]
+                        if let detail = option.detail {
+                            optionResult["description"] = detail
+                        }
+                        return optionResult
+                    }
+                ]
+                if let header = question.header {
+                    result["header"] = header
+                }
+                return result
+            }
+        ]
+    }
+}
+
+enum ProjectedTimelineItemContent: Equatable, Sendable {
+    case user(String)
+    case assistant(String)
+    case tool(ToolCallItem)
+    case thinking(String)
+    case interrupted
+}
+
+struct ProjectedTimelineItemState: Identifiable, Equatable, Sendable {
+    let id: String
+    let content: ProjectedTimelineItemContent
+    let timestamp: Date
+}
+
+struct ProjectedSessionViewState: Identifiable, Equatable, Sendable {
+    let sessionID: String
+    let adapterID: RuntimeAdapterID
+    let familyID: RuntimeFamilyID
+    let agentID: String
+    let title: String
+    let cwd: String
+    let pid: Int?
+    let tty: String?
+    let isInTmux: Bool
+    let phase: ProjectedSessionRuntimePhase
+    let prompt: ProjectedPromptState?
+    let pendingInteractionCount: Int
+    let lastActivity: Date
+    let createdAt: Date
+    let messages: [ProjectedMessageState]
+    let tools: [ProjectedToolState]
+    let timeline: [ProjectedTimelineItemState]
+    let agentDescriptions: [String: String]
+    let firstUserMessage: String?
+    let lastUserMessage: String?
+    let lastUserMessageDate: Date?
+    let lastMessage: String?
+    let lastMessageRole: String?
+    let lastToolName: String?
+    let pendingToolName: String?
+    let pendingToolInput: String?
+
+    var id: String { sessionID }
+
+    var stableID: String { sessionID }
+
+    var displayTitle: String { title }
+
+    var needsAttention: Bool {
+        phase.needsAttention || prompt != nil
+    }
+}
+
+struct ProjectedInteractionPopState: Equatable, Identifiable, Sendable {
+    let sessionID: String
+    let prompt: ProjectedPromptState
+    let createdAt: Date
+
+    var id: String { prompt.id }
+}
+
 struct ProjectedSessionListItemState: Identifiable, Equatable, Sendable {
     let id: String
     let title: String

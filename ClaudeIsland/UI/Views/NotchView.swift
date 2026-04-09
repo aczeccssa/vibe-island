@@ -32,10 +32,10 @@ struct NotchView: View {
     /// The agent whose accent color should drive the compact header UI.
     private var activeAgentId: String? {
         let activeSession = sessionMonitor.instances
-            .filter { $0.phase == .processing || $0.phase == .compacting || $0.phase.isWaitingForApproval || $0.phase == .waitingForInput }
+            .filter { $0.phase.isProcessingLike || $0.phase.isWaitingForApproval || $0.phase == .waitingForInput }
             .max { $0.lastActivity < $1.lastActivity }
 
-        return activeSession?.agentId ?? AgentRegistry.shared.primaryAgentId
+        return activeSession?.agentID ?? AgentRegistry.shared.primaryLegacyAgentID
     }
 
     private var activeAgentAccentColor: Color {
@@ -77,7 +77,7 @@ struct NotchView: View {
         return sessionMonitor.instances.contains { session in
             guard session.phase == .waitingForInput else { return false }
             // Only show if within the 30-second display window
-            if let enteredAt = waitingForInputTimestamps[session.stableId] {
+            if let enteredAt = waitingForInputTimestamps[session.stableID] {
                 return now.timeIntervalSince(enteredAt) < displayDuration
             }
             return false
@@ -365,24 +365,24 @@ struct NotchView: View {
         Group {
             if showingInteractionPop, let popState = viewModel.activeInteractionPop {
                 InteractionPopView(
-                    session: sessionMonitor.instances.first(where: { $0.sessionId == popState.sessionId }),
-                    interaction: popState.interaction,
-                    isSubmitting: sessionMonitor.submittingInteractionSessionIds.contains(popState.sessionId),
-                    submitError: sessionMonitor.interactionSubmitErrors[popState.sessionId],
+                    session: sessionMonitor.instances.first(where: { $0.sessionID == popState.sessionID }),
+                    interaction: popState.prompt,
+                    isSubmitting: sessionMonitor.submittingInteractionSessionIds.contains(popState.sessionID),
+                    submitError: sessionMonitor.interactionSubmitErrors[popState.sessionID],
                     onSubmitResponses: { responses in
-                        handleInteractionResponseSelection(sessionId: popState.sessionId, interaction: popState.interaction, responses: responses)
+                        handleInteractionResponseSelection(sessionID: popState.sessionID, interaction: popState.prompt, responses: responses)
                     },
                     onOpenHostApp: {
                         Task {
-                            _ = await sessionMonitor.focusSession(sessionId: popState.sessionId)
+                            _ = await sessionMonitor.focusSession(sessionId: popState.sessionID)
                         }
                     },
                     onOpenSession: {
-                        if let session = sessionMonitor.instances.first(where: { $0.sessionId == popState.sessionId }) {
+                        if let session = sessionMonitor.instances.first(where: { $0.sessionID == popState.sessionID }) {
                             viewModel.notchOpen(reason: .click)
                             viewModel.contentType = .instances
-                            viewModel.pendingExpandedSessionId = session.sessionId
-                            viewModel.pendingScrollToSessionId = session.sessionId
+                            viewModel.pendingExpandedSessionId = session.sessionID
+                            viewModel.pendingScrollToSessionId = session.sessionID
                         }
                     }
                 )
@@ -396,14 +396,28 @@ struct NotchView: View {
                     .accessibilityIdentifier("instances.view")
                 case .menu:
                     NotchMenuView(viewModel: viewModel)
-                case .chat(let session):
-                    ChatView(
-                        sessionId: session.sessionId,
-                        initialSession: session,
-                        sessionMonitor: sessionMonitor,
-                        viewModel: viewModel
-                    )
-                    .accessibilityIdentifier("chat.view")
+                case .chat(let sessionID):
+                    if let session = sessionMonitor.instances.first(where: { $0.sessionID == sessionID }) {
+                        ChatView(
+                            sessionId: session.sessionID,
+                            initialSession: session,
+                            sessionMonitor: sessionMonitor,
+                            viewModel: viewModel
+                        )
+                        .accessibilityIdentifier("chat.view")
+                    } else {
+                        AgentInstancesView(
+                            sessionMonitor: sessionMonitor,
+                            viewModel: viewModel
+                        )
+                        .accessibilityIdentifier("instances.view")
+                        .task(id: sessionID) {
+                            if case .chat(let current) = viewModel.contentType,
+                               current == sessionID {
+                                viewModel.exitChat()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -456,23 +470,8 @@ struct NotchView: View {
         }
     }
 
-    private func handleChoiceInteractionsChange(_ instances: [SessionState]) {
-        let activeInteractions = instances.compactMap { session -> SessionInteractionRequest? in
-            if let interaction = session.activeInteraction {
-                return interaction
-            }
-
-            guard let permission = session.activePermission else {
-                return nil
-            }
-
-            return SessionInteractionRequest.from(
-                permission: permission,
-                sessionId: session.sessionId,
-                agentId: session.agentId,
-                submitMode: SessionInteractionRequest.submitMode(isInTmux: session.isInTmux, tty: session.tty)
-            )
-        }
+    private func handleChoiceInteractionsChange(_ instances: [ProjectedSessionViewState]) {
+        let activeInteractions = instances.compactMap(\.prompt)
         let currentIds = Set(activeInteractions.map(\.id))
         let newIds = currentIds.subtracting(previousChoiceInteractionIds)
 
@@ -481,7 +480,7 @@ struct NotchView: View {
             .sorted(by: { $0.createdAt < $1.createdAt })
 
         for interaction in newInteractions {
-            viewModel.enqueueInteractionPop(for: interaction.sessionId, interaction: interaction)
+            viewModel.enqueueInteractionPop(for: interaction.sessionID, prompt: interaction)
         }
 
         viewModel.pruneInteractionQueue(validInteractionIds: currentIds)
@@ -489,16 +488,16 @@ struct NotchView: View {
         previousChoiceInteractionIds = currentIds
     }
 
-    private func handleWaitingForInputChange(_ instances: [SessionState]) {
+    private func handleWaitingForInputChange(_ instances: [ProjectedSessionViewState]) {
         // Get sessions that are now waiting for input
         let waitingForInputSessions = instances.filter { $0.phase == .waitingForInput }
-        let currentIds = Set(waitingForInputSessions.map { $0.stableId })
+        let currentIds = Set(waitingForInputSessions.map { $0.stableID })
         let newWaitingIds = currentIds.subtracting(previousWaitingForInputIds)
 
         // Track timestamps for newly waiting sessions
         let now = Date()
-        for session in waitingForInputSessions where newWaitingIds.contains(session.stableId) {
-            waitingForInputTimestamps[session.stableId] = now
+        for session in waitingForInputSessions where newWaitingIds.contains(session.stableID) {
+            waitingForInputTimestamps[session.stableID] = now
         }
 
         // Clean up timestamps for sessions no longer waiting
@@ -510,7 +509,7 @@ struct NotchView: View {
         // Bounce the notch when a session newly enters waitingForInput state
         if !newWaitingIds.isEmpty {
             // Get the sessions that just entered waitingForInput
-            let newlyWaitingSessions = waitingForInputSessions.filter { newWaitingIds.contains($0.stableId) }
+            let newlyWaitingSessions = waitingForInputSessions.filter { newWaitingIds.contains($0.stableID) }
 
             // Play notification sound if the session is not actively focused
             if let soundName = AppSettings.notificationSound.soundName {
@@ -546,7 +545,7 @@ struct NotchView: View {
 
     /// Determine if notification sound should play for the given sessions
     /// Returns true if ANY session is not actively focused
-    private func shouldPlayNotificationSound(for sessions: [SessionState]) async -> Bool {
+    private func shouldPlayNotificationSound(for sessions: [ProjectedSessionViewState]) async -> Bool {
         for session in sessions {
             guard let pid = session.pid else {
                 // No PID means we can't check focus, assume not focused
@@ -562,77 +561,65 @@ struct NotchView: View {
         return false
     }
 
-    private func handleInteractionOptionSelection(
-        sessionId: String,
-        interaction: SessionInteractionRequest,
-        option: InteractionOption
-    ) {
-        handleInteractionResponseSelection(
-            sessionId: sessionId,
-            interaction: interaction,
-            responses: [InteractionResponse(questionId: interaction.questions.first?.id ?? "question-0", option: option)]
-        )
-    }
-
     private func handleInteractionResponseSelection(
-        sessionId: String,
-        interaction: SessionInteractionRequest,
-        responses: [InteractionResponse]
+        sessionID: String,
+        interaction: ProjectedPromptState,
+        responses: [ProjectedPromptSelection]
     ) {
-        guard let session = sessionMonitor.instances.first(where: { $0.sessionId == sessionId }) else {
+        guard let session = sessionMonitor.instances.first(where: { $0.sessionID == sessionID }) else {
             return
         }
 
         Task {
-            let result = await sessionMonitor.submitInteraction(sessionId: session.sessionId, responses: responses)
+            let result = await sessionMonitor.submitInteraction(sessionId: session.sessionID, selections: responses)
             if result.succeeded {
                 await MainActor.run {
-                    viewModel.clearInteraction(for: sessionId, interactionId: interaction.id)
+                    viewModel.clearInteraction(for: sessionID, interactionId: interaction.id)
                 }
             }
         }
     }
 
-    private func applyFixtureInitialContentIfNeeded(_ instances: [SessionState]) {
+    private func applyFixtureInitialContentIfNeeded(_ instances: [ProjectedSessionViewState]) {
         guard ProjectionLaunchMode.current.isFixture,
               !appliedFixtureInitialContent else {
             return
         }
 
-        guard let sessionID = ProjectionCompatibilityStore.shared.fixtureBootSessionID else {
+        guard let sessionID = sessionMonitor.fixtureBootSessionID else {
             appliedFixtureInitialContent = true
             return
         }
 
-        guard let session = instances.first(where: { $0.sessionId == sessionID }) else {
+        guard let session = instances.first(where: { $0.sessionID == sessionID }) else {
             return
         }
 
         appliedFixtureInitialContent = true
         DispatchQueue.main.async {
             viewModel.notchOpen(reason: .boot)
-            viewModel.showChat(for: session)
+            viewModel.showChat(for: session.sessionID)
         }
     }
 }
 
 private struct InteractionPopView: View {
-    let session: SessionState?
-    let interaction: SessionInteractionRequest
+    let session: ProjectedSessionViewState?
+    let interaction: ProjectedPromptState
     let isSubmitting: Bool
     let submitError: String?
-    let onSubmitResponses: ([InteractionResponse]) -> Void
+    let onSubmitResponses: ([ProjectedPromptSelection]) -> Void
     let onOpenHostApp: () -> Void
     let onOpenSession: () -> Void
 
-    @State private var selections: [String: InteractionOption] = [:]
+    @State private var selections: [String: ProjectedInteractionOptionState] = [:]
     @State private var currentQuestionIndex = 0
 
     private var accentColor: Color {
-        TerminalColors.agentAccent(for: session?.agentId)
+        TerminalColors.agentAccent(for: session?.agentID)
     }
 
-    private var currentQuestion: InteractionQuestion? {
+    private var currentQuestion: ProjectedInteractionQuestionState? {
         guard !interaction.questions.isEmpty else { return nil }
         return interaction.questions[min(currentQuestionIndex, interaction.questions.count - 1)]
     }
@@ -661,7 +648,7 @@ private struct InteractionPopView: View {
                             .foregroundColor(.white)
                             .lineLimit(1)
 
-                        Text(AgentRegistry.shared.shortDisplayName(for: session?.agentId ?? interaction.sourceAgent))
+                        Text(AgentRegistry.shared.shortDisplayName(for: session?.adapterID))
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundColor(accentColor.opacity(0.95))
                             .padding(.horizontal, 7)
@@ -688,7 +675,7 @@ private struct InteractionPopView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text(interaction.submitMode == .focusOnly ? "Selecting an option will bring the original host app forward." : "Select an option directly from the island.")
+                Text(interaction.responseCapability == .detectOnly ? "Detected options only; open the host app to respond." : "Select an option directly from the island.")
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.48))
                     .lineLimit(2)
@@ -833,7 +820,7 @@ private struct InteractionPopView: View {
         }
     }
 
-    private func backgroundColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
+    private func backgroundColor(for role: ProjectedInteractionOptionRole, isSelected: Bool = false) -> Color {
         if isSelected {
             return accentColor.opacity(0.82)
         }
@@ -849,7 +836,7 @@ private struct InteractionPopView: View {
         }
     }
 
-    private func foregroundColor(for role: InteractionOptionRole) -> Color {
+    private func foregroundColor(for role: ProjectedInteractionOptionRole) -> Color {
         switch role {
         case .primary:
             return .black.opacity(0.9)
@@ -862,7 +849,7 @@ private struct InteractionPopView: View {
         }
     }
 
-    private func borderColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
+    private func borderColor(for role: ProjectedInteractionOptionRole, isSelected: Bool = false) -> Color {
         if isSelected {
             return Color.white.opacity(0.22)
         }
@@ -878,18 +865,18 @@ private struct InteractionPopView: View {
         }
     }
 
-    private func handleSelection(_ option: InteractionOption, for question: InteractionQuestion) {
+    private func handleSelection(_ option: ProjectedInteractionOptionState, for question: ProjectedInteractionQuestionState) {
         if interaction.isMultiQuestion {
             selections[question.id] = option
         } else {
-            onSubmitResponses([InteractionResponse(questionId: question.id, option: option)])
+            onSubmitResponses([ProjectedPromptSelection(questionID: question.id, option: option)])
         }
     }
 
     private func submitAllResponses() {
         onSubmitResponses(interaction.questions.compactMap { question in
             guard let option = selections[question.id] else { return nil }
-            return InteractionResponse(questionId: question.id, option: option)
+            return ProjectedPromptSelection(questionID: question.id, option: option)
         })
     }
 

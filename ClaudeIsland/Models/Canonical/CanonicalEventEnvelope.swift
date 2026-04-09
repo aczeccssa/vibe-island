@@ -516,6 +516,10 @@ enum CanonicalEventPayload: Equatable, Sendable {
 }
 
 struct CanonicalEventEnvelope: Codable, Equatable, Sendable {
+    private static let dedupeZeroEventID = UUID(uuid: (
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ))
+
     let eventID: UUID
     let schemaVersion: CanonicalSchemaVersion
     let type: CanonicalEventType
@@ -675,9 +679,8 @@ struct CanonicalEventEnvelope: Codable, Equatable, Sendable {
     }
 
     func dedupeFingerprint() throws -> Data {
-        let zeroUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
         let normalized = try CanonicalEventEnvelope(
-            eventID: zeroUUID,
+            eventID: Self.dedupeZeroEventID,
             schemaVersion: schemaVersion,
             type: type,
             occurredAt: occurredAt,

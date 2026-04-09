@@ -2,7 +2,7 @@
 //  ProjectionBootstrap.swift
 //  ClaudeIsland
 //
-//  Minimal Phase 1 projection runtime bootstrap for live ingress and fixtures.
+//  Projection-owned runtime bootstrap for live ingress and fixtures.
 //
 
 import Foundation
@@ -40,16 +40,18 @@ struct ProjectionRuntimeMetadata: Equatable, Sendable {
     var pid: Int?
     var tty: String?
     var isInTmux: Bool
-    var phase: SessionPhase
-    var activeInteraction: SessionInteractionRequest?
+    var phase: ProjectedSessionRuntimePhase
+    var activePrompt: ProjectedPromptState?
     var lastActivity: Date
     let createdAt: Date
 }
 
 private struct ProjectionHydratedArtifacts: Sendable {
     let conversationInfo: ConversationInfo
-    let chatItems: [ChatHistoryItem]
-    let subagentState: SubagentState
+    let timeline: [ProjectedTimelineItemState]
+    let messages: [ProjectedMessageState]
+    let tools: [ProjectedToolState]
+    let agentDescriptions: [String: String]
     let lastUpdatedAt: Date
 }
 
@@ -61,7 +63,12 @@ actor ProjectionBootstrap {
 
     private var startedMode: ProjectionLaunchMode?
     private var runtimeMetadataBySessionID: [String: ProjectionRuntimeMetadata] = [:]
+    private var artifactsBySessionID: [String: ProjectionHydratedArtifacts] = [:]
+    private var cachedUISessionsByID: [String: ProjectedSessionViewState] = [:]
+    private var capabilities: [RuntimeAdapterID: [CanonicalSemanticArea: AdapterCapabilitySnapshot]] = [:]
     private var suppressedSessionIDs: Set<String> = []
+    private var clearedAtBySessionID: [String: Date] = [:]
+    private var fixtureBootSessionIDValue: String?
 
     private init() {}
 
@@ -73,18 +80,24 @@ actor ProjectionBootstrap {
         case .live:
             await rebuildProjectionState()
         case .projectedFixture(let configuration):
-            await loadFixture(at: configuration.fixturePath, initialContent: configuration.initialContent)
+            await loadFixture(
+                at: configuration.fixturePath,
+                initialContent: configuration.initialContent
+            )
         }
     }
 
     func stop() async {
         startedMode = nil
         runtimeMetadataBySessionID.removeAll()
+        artifactsBySessionID.removeAll()
+        cachedUISessionsByID.removeAll()
+        capabilities.removeAll()
         suppressedSessionIDs.removeAll()
+        clearedAtBySessionID.removeAll()
+        fixtureBootSessionIDValue = nil
         await projectionStore.reset()
-        await MainActor.run {
-            ProjectionCompatibilityStore.shared.clear()
-        }
+        ShadowDiffLogger.updateProjectedSnapshot(nil)
     }
 
     func handleHookEvent(_ event: HookEvent) async {
@@ -92,67 +105,68 @@ actor ProjectionBootstrap {
 
         let runtimeIdentity = event.legacyRuntimeIdentity
             ?? RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .unknown)
-        let currentPhase = event.determinePhase()
         let now = Date()
-        let isInTmux: Bool
-
-        if let pid = event.pid {
-            let tree = ProcessTreeBuilder.shared.buildTree()
-            isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
-        } else {
-            isInTmux = event.tty != nil
-        }
-
-        if var existing = runtimeMetadataBySessionID[event.sessionId] {
-            existing.agentID = event.agentId
-            existing.runtimeIdentity = runtimeIdentity
-            existing.cwd = event.cwd
-            existing.pid = event.pid ?? existing.pid
-            existing.tty = event.tty?.replacingOccurrences(of: "/dev/", with: "") ?? existing.tty
-            existing.isInTmux = isInTmux || existing.isInTmux
-            existing.phase = currentPhase
-            existing.activeInteraction = buildActiveInteraction(
-                from: event,
-                sessionID: event.sessionId,
-                isInTmux: isInTmux,
-                tty: existing.tty
-            ) ?? existing.activeInteraction
-            existing.lastActivity = now
-            runtimeMetadataBySessionID[event.sessionId] = existing
-        } else {
-            runtimeMetadataBySessionID[event.sessionId] = ProjectionRuntimeMetadata(
+        let normalizedTTY = event.tty?.replacingOccurrences(of: "/dev/", with: "")
+        let existingMetadata = runtimeMetadataBySessionID[event.sessionId]
+        let isInTmux = resolvedTmuxState(
+            pid: event.pid ?? existingMetadata?.pid,
+            tty: normalizedTTY ?? existingMetadata?.tty,
+            existing: existingMetadata
+        )
+        var metadata = existingMetadata
+            ?? ProjectionRuntimeMetadata(
                 sessionID: event.sessionId,
                 agentID: event.agentId,
                 runtimeIdentity: runtimeIdentity,
                 cwd: event.cwd,
                 pid: event.pid,
-                tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
+                tty: normalizedTTY,
                 isInTmux: isInTmux,
-                phase: currentPhase,
-                activeInteraction: buildActiveInteraction(
-                    from: event,
-                    sessionID: event.sessionId,
-                    isInTmux: isInTmux,
-                    tty: event.tty?.replacingOccurrences(of: "/dev/", with: "")
-                ),
+                phase: .idle,
+                activePrompt: nil,
                 lastActivity: now,
                 createdAt: now
             )
+
+        metadata.agentID = event.agentId
+        metadata.runtimeIdentity = runtimeIdentity
+        metadata.cwd = event.cwd
+        metadata.pid = event.pid ?? metadata.pid
+        metadata.tty = normalizedTTY ?? metadata.tty
+        metadata.isInTmux = isInTmux || metadata.isInTmux
+        metadata.lastActivity = now
+
+        if let prompt = ProjectionRuntimeBuilder.buildPrompt(
+            from: event,
+            sessionID: event.sessionId,
+            runtimeIdentity: runtimeIdentity
+        ) {
+            metadata.activePrompt = prompt
+            metadata.phase = prompt.kind == .approval ? .waitingForApproval : .waitingForInput
+        } else {
+            metadata.phase = ProjectionRuntimeBuilder.runtimePhase(from: event, current: metadata.phase)
         }
 
         if let toolUseID = event.toolUseId,
            event.event == HookEventType.postToolUse.rawValue || event.event == HookEventType.interactionResolved.rawValue,
-           runtimeMetadataBySessionID[event.sessionId]?.activeInteraction?.toolUseId == toolUseID {
-            runtimeMetadataBySessionID[event.sessionId]?.activeInteraction = nil
+           metadata.activePrompt?.toolUseID == toolUseID {
+            metadata.activePrompt = nil
+            metadata.phase = event.status == "ended" ? .ended : .processing
         }
 
         if event.event == HookEventType.stop.rawValue {
-            runtimeMetadataBySessionID[event.sessionId]?.activeInteraction = nil
+            metadata.activePrompt = nil
+            metadata.phase = .idle
         }
 
         if event.status == "ended" || event.event == HookEventType.stop.rawValue {
             runtimeMetadataBySessionID.removeValue(forKey: event.sessionId)
+            artifactsBySessionID.removeValue(forKey: event.sessionId)
+            cachedUISessionsByID.removeValue(forKey: event.sessionId)
             suppressedSessionIDs.remove(event.sessionId)
+            clearedAtBySessionID.removeValue(forKey: event.sessionId)
+        } else {
+            runtimeMetadataBySessionID[event.sessionId] = metadata
         }
 
         await rebuildProjectionState()
@@ -169,40 +183,41 @@ actor ProjectionBootstrap {
 
         let runtimeIdentity = RuntimeIdentity.fromLegacyAgentID(agentID)
             ?? RuntimeIdentity(adapterID: .codexCLI, familyID: .codex, modeHint: .unknown)
-        let isInTmux: Bool
-        if let pid {
-            let tree = ProcessTreeBuilder.shared.buildTree()
-            isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
-        } else {
-            isInTmux = tty != nil
-        }
-
+        let normalizedTTY = tty?.replacingOccurrences(of: "/dev/", with: "")
+        let existingMetadata = runtimeMetadataBySessionID[sessionID]
+        let isInTmux = resolvedTmuxState(
+            pid: pid ?? existingMetadata?.pid,
+            tty: normalizedTTY ?? existingMetadata?.tty,
+            existing: existingMetadata
+        )
         let now = Date()
-        if var existing = runtimeMetadataBySessionID[sessionID] {
-            existing.agentID = agentID
-            existing.runtimeIdentity = runtimeIdentity
-            existing.cwd = cwd
-            existing.pid = pid ?? existing.pid
-            existing.tty = tty?.replacingOccurrences(of: "/dev/", with: "") ?? existing.tty
-            existing.isInTmux = isInTmux || existing.isInTmux
-            existing.phase = existing.phase == .idle ? .processing : existing.phase
-            existing.lastActivity = now
-            runtimeMetadataBySessionID[sessionID] = existing
-        } else {
-            runtimeMetadataBySessionID[sessionID] = ProjectionRuntimeMetadata(
+        var metadata = existingMetadata
+            ?? ProjectionRuntimeMetadata(
                 sessionID: sessionID,
                 agentID: agentID,
                 runtimeIdentity: runtimeIdentity,
                 cwd: cwd,
                 pid: pid,
-                tty: tty?.replacingOccurrences(of: "/dev/", with: ""),
+                tty: normalizedTTY,
                 isInTmux: isInTmux,
                 phase: .processing,
-                activeInteraction: nil,
+                activePrompt: nil,
                 lastActivity: now,
                 createdAt: now
             )
+
+        metadata.agentID = agentID
+        metadata.runtimeIdentity = runtimeIdentity
+        metadata.cwd = cwd
+        metadata.pid = pid ?? metadata.pid
+        metadata.tty = normalizedTTY ?? metadata.tty
+        metadata.isInTmux = isInTmux || metadata.isInTmux
+        if metadata.phase == .idle {
+            metadata.phase = .processing
         }
+        metadata.lastActivity = now
+        runtimeMetadataBySessionID[sessionID] = metadata
+        clearedAtBySessionID.removeValue(forKey: sessionID)
 
         await rebuildProjectionState()
     }
@@ -210,13 +225,16 @@ actor ProjectionBootstrap {
     func handleProcessEnded(sessionID: String) async {
         guard activeModeStartsLiveIngress else { return }
         runtimeMetadataBySessionID.removeValue(forKey: sessionID)
+        artifactsBySessionID.removeValue(forKey: sessionID)
+        cachedUISessionsByID.removeValue(forKey: sessionID)
         suppressedSessionIDs.remove(sessionID)
+        clearedAtBySessionID.removeValue(forKey: sessionID)
         await rebuildProjectionState()
     }
 
     func handleInterruptDetected(sessionID: String) async {
-        guard activeModeStartsLiveIngress else { return }
-        guard var metadata = runtimeMetadataBySessionID[sessionID] else { return }
+        guard activeModeStartsLiveIngress,
+              var metadata = runtimeMetadataBySessionID[sessionID] else { return }
         metadata.phase = .idle
         metadata.lastActivity = Date()
         runtimeMetadataBySessionID[sessionID] = metadata
@@ -225,6 +243,7 @@ actor ProjectionBootstrap {
 
     func archiveSession(_ sessionID: String) async {
         suppressedSessionIDs.insert(sessionID)
+        await projectionStore.updateConversationStatus(id: sessionID, status: .archived)
         await rebuildProjectionState()
     }
 
@@ -233,8 +252,109 @@ actor ProjectionBootstrap {
         await rebuildProjectionState()
     }
 
+    func clearSessionSurface(_ sessionID: String, clearedAt: Date = Date()) async {
+        guard runtimeMetadataBySessionID[sessionID] != nil else { return }
+        clearedAtBySessionID[sessionID] = clearedAt
+        await rebuildProjectionState()
+    }
+
     func refresh() async {
         guard startedMode != nil else { return }
+        await rebuildProjectionState()
+    }
+
+    func publishCapability(_ capability: AdapterCapabilitySnapshot) async {
+        capabilities[capability.adapterID, default: [:]][capability.semanticArea] = capability
+        await projectionStore.publishCapability(capability)
+    }
+
+    func trackedSessions() -> [RuntimeTrackedSession] {
+        runtimeMetadataBySessionID.values
+            .filter { !suppressedSessionIDs.contains($0.sessionID) }
+            .map { RuntimeTrackedSession(sessionID: $0.sessionID, pid: $0.pid) }
+    }
+
+    func uiSessions() -> [ProjectedSessionViewState] {
+        cachedUISessionsByID.values.sorted { lhs, rhs in
+            if lhs.needsAttention != rhs.needsAttention {
+                return lhs.needsAttention && !rhs.needsAttention
+            }
+            let leftDate = lhs.lastUserMessageDate ?? lhs.lastActivity
+            let rightDate = rhs.lastUserMessageDate ?? rhs.lastActivity
+            return leftDate > rightDate
+        }
+    }
+
+    func uiSession(id: String) -> ProjectedSessionViewState? {
+        cachedUISessionsByID[id]
+    }
+
+    func fixtureBootSessionID() -> String? {
+        fixtureBootSessionIDValue
+    }
+
+    func applyCommandDispatch(
+        _ result: CanonicalCommandDispatchResult,
+        for command: CanonicalCommandEnvelope
+    ) async {
+        await projectionStore.apply(result, for: command)
+
+        guard var metadata = runtimeMetadataBySessionID[command.conversationID] else { return }
+        switch command.type {
+        case .approvalResolve:
+            if result.status == .accepted,
+               metadata.activePrompt?.kind == .approval,
+               metadata.activePrompt?.id == command.target.entityID {
+                metadata.activePrompt = nil
+                metadata.phase = .processing
+            }
+        case .choiceSubmit:
+            if result.status == .accepted,
+               metadata.activePrompt?.kind == .choice,
+               metadata.activePrompt?.id == command.target.entityID {
+                metadata.activePrompt = nil
+                metadata.phase = .processing
+            }
+        case .sessionArchive:
+            if result.status == .accepted {
+                suppressedSessionIDs.insert(command.conversationID)
+            }
+        case .sessionFocus, .sessionInterrupt, .sessionClear:
+            break
+        }
+
+        runtimeMetadataBySessionID[command.conversationID] = metadata
+        await rebuildProjectionState()
+    }
+
+    func applySyntheticInteractionResolution(_ event: CanonicalEventEnvelope) async {
+        await projectionStore.apply(event)
+
+        guard var metadata = runtimeMetadataBySessionID[event.conversation.id] else {
+            return
+        }
+
+        switch event.payload {
+        case .approvalResolved(let payload):
+            if metadata.activePrompt?.kind == .approval,
+               metadata.activePrompt?.id == payload.approval.id {
+                metadata.activePrompt = nil
+            }
+        case .userChoiceResolved(let payload):
+            if metadata.activePrompt?.kind == .choice,
+               metadata.activePrompt?.id == payload.choice.id {
+                metadata.activePrompt = nil
+            }
+        default:
+            return
+        }
+
+        let snapshot = await projectionStore.snapshot()
+        metadata.phase = ProjectionRuntimeBuilder.runtimePhase(
+            from: snapshot.conversations[event.conversation.id],
+            activePrompt: metadata.activePrompt
+        )
+        runtimeMetadataBySessionID[event.conversation.id] = metadata
         await rebuildProjectionState()
     }
 
@@ -260,33 +380,27 @@ actor ProjectionBootstrap {
                 }
                 return parsed
             }
+
             let fixture = try decoder.decode(ProjectionFixtureDocument.self, from: data)
 
             runtimeMetadataBySessionID = Dictionary(
                 uniqueKeysWithValues: fixture.sessions.map { metadata in
                     let runtimeIdentity = RuntimeIdentity.fromLegacyAgentID(metadata.agentID)
                         ?? RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .unknown)
+                    let conversation = fixture.snapshot.conversations[metadata.sessionID]
+                    let activePrompt = ProjectionRuntimeBuilder.prompt(from: conversation, sessionID: metadata.sessionID, agentID: metadata.agentID)
                     return (
                         metadata.sessionID,
                         ProjectionRuntimeMetadata(
                             sessionID: metadata.sessionID,
                             agentID: metadata.agentID,
                             runtimeIdentity: runtimeIdentity,
-                            cwd: fixture.snapshot.conversations[metadata.sessionID]?.cwd ?? "",
+                            cwd: conversation?.cwd ?? "",
                             pid: metadata.pid,
                             tty: metadata.tty,
                             isInTmux: metadata.isInTmux,
-                            phase: fixture.snapshot.conversations[metadata.sessionID].map {
-                                switch $0.status {
-                                case .active:
-                                    return .processing
-                                case .completed, .archived:
-                                    return .ended
-                                case .idle, .errored, .unknown:
-                                    return .idle
-                                }
-                            } ?? .idle,
-                            activeInteraction: nil,
+                            phase: ProjectionRuntimeBuilder.runtimePhase(from: conversation, activePrompt: activePrompt),
+                            activePrompt: activePrompt,
                             lastActivity: metadata.lastActivity,
                             createdAt: metadata.createdAt ?? metadata.lastActivity
                         )
@@ -294,147 +408,171 @@ actor ProjectionBootstrap {
                 }
             )
 
+            artifactsBySessionID = Dictionary(
+                uniqueKeysWithValues: fixture.snapshot.conversations.map { sessionID, conversation in
+                    (sessionID, ProjectionRuntimeBuilder.fallbackArtifacts(from: conversation, adapterID: conversation.adapterID))
+                }
+            )
+
+            capabilities = fixture.snapshot.capabilities
+            cachedUISessionsByID = buildUISessions(
+                snapshot: fixture.snapshot,
+                hiddenSessionIDs: suppressedSessionIDs
+            )
             await projectionStore.replaceSnapshot(fixture.snapshot)
 
-            let sessions = buildCompatibilitySessions(
-                snapshot: fixture.snapshot,
-                artifactsBySessionID: [:]
-            )
-            let compatibility = CompatibilityStateProjector.project(fixture.snapshot)
-            ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
-            let fixtureBootSessionID: String?
             switch initialContent {
             case .instances:
-                fixtureBootSessionID = nil
+                fixtureBootSessionIDValue = nil
             case .chat(let sessionID):
-                fixtureBootSessionID = sessionID
+                fixtureBootSessionIDValue = sessionID
             }
-            await MainActor.run {
-                ProjectionCompatibilityStore.shared.update(
-                    sessions: sessions,
-                    hydratedSessionIDs: Set(fixture.snapshot.conversations.keys),
-                    fixtureBootSessionID: fixtureBootSessionID
-                )
-            }
+            let compatibility = CompatibilityStateProjector.project(fixture.snapshot)
+            ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
         } catch {
+            runtimeMetadataBySessionID.removeAll()
+            artifactsBySessionID.removeAll()
+            cachedUISessionsByID.removeAll()
+            capabilities.removeAll()
+            fixtureBootSessionIDValue = nil
             await projectionStore.reset()
-            await MainActor.run {
-                ProjectionCompatibilityStore.shared.clear()
-            }
+            ShadowDiffLogger.updateProjectedSnapshot(nil)
         }
     }
 
     private func rebuildProjectionState() async {
-        let activeMetadata = runtimeMetadataBySessionID
-            .filter { !suppressedSessionIDs.contains($0.key) }
-            .map(\.value)
+        let metadataList = runtimeMetadataBySessionID.map(\.value)
+        let previousSnapshot = await projectionStore.snapshot()
 
-        let artifactsBySessionID = Dictionary(
-            uniqueKeysWithValues: await activeMetadata.asyncMap { [self] metadata in
-                let artifacts = await self.hydrateArtifacts(for: metadata)
-                return (metadata.sessionID, artifacts)
-            }
-        )
-
-        let snapshot = buildSnapshot(
-            from: activeMetadata,
-            artifactsBySessionID: artifactsBySessionID
-        )
-        await projectionStore.replaceSnapshot(snapshot)
-
-        let sessions = buildCompatibilitySessions(
-            snapshot: snapshot,
-            artifactsBySessionID: artifactsBySessionID
-        )
-        let compatibility = CompatibilityStateProjector.project(snapshot)
-        ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
-        await MainActor.run {
-            ProjectionCompatibilityStore.shared.update(
-                sessions: sessions,
-                hydratedSessionIDs: Set(snapshot.conversations.keys),
-                fixtureBootSessionID: nil
+        if startedMode?.isFixture == true {
+            artifactsBySessionID = Dictionary(
+                uniqueKeysWithValues: metadataList.map { metadata in
+                    let artifacts = fixtureArtifacts(
+                        for: metadata,
+                        previousConversations: previousSnapshot.conversations
+                    )
+                    return (metadata.sessionID, artifacts)
+                }
+            )
+        } else {
+            artifactsBySessionID = Dictionary(
+                uniqueKeysWithValues: await metadataList.asyncMap { [self] metadata in
+                    let artifacts = await hydrateArtifacts(for: metadata)
+                    return (metadata.sessionID, artifacts)
+                }
             )
         }
+
+        let snapshot = buildSnapshot(
+            from: metadataList,
+            artifactsBySessionID: artifactsBySessionID,
+            previousConversations: previousSnapshot.conversations,
+            archivedSessionIDs: suppressedSessionIDs
+        )
+        cachedUISessionsByID = buildUISessions(
+            snapshot: snapshot,
+            hiddenSessionIDs: suppressedSessionIDs
+        )
+        await projectionStore.replaceSnapshot(snapshot)
+        let compatibility = CompatibilityStateProjector.project(snapshot)
+        ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
+    }
+
+    private func fixtureArtifacts(
+        for metadata: ProjectionRuntimeMetadata,
+        previousConversations: [String: ProjectedConversationState]
+    ) -> ProjectionHydratedArtifacts {
+        let baseArtifacts = artifactsBySessionID[metadata.sessionID]
+            ?? previousConversations[metadata.sessionID].map { conversation in
+                ProjectionRuntimeBuilder.fallbackArtifacts(from: conversation, adapterID: metadata.runtimeIdentity.adapterID)
+            }
+            ?? ProjectionRuntimeBuilder.emptyArtifacts(
+                summary: URL(fileURLWithPath: metadata.cwd).lastPathComponent,
+                lastUpdatedAt: metadata.lastActivity
+            )
+
+        guard clearedAtBySessionID[metadata.sessionID] != nil else {
+            return baseArtifacts
+        }
+
+        return ProjectionRuntimeBuilder.clearedArtifacts(from: baseArtifacts)
     }
 
     private func hydrateArtifacts(for metadata: ProjectionRuntimeMetadata) async -> ProjectionHydratedArtifacts {
-        let messages = await ConversationParser.shared.parseFullConversation(
+        let parsedMessages = await ConversationParser.shared.parseFullConversation(
             sessionId: metadata.sessionID,
             cwd: metadata.cwd
         )
-        let completedToolIDs = await ConversationParser.shared.completedToolIds(for: metadata.sessionID)
-        let toolResults = await ConversationParser.shared.toolResults(for: metadata.sessionID)
-        let structuredResults = await ConversationParser.shared.structuredResults(for: metadata.sessionID)
-        let conversationInfo = await ConversationParser.shared.parse(
+        let allCompletedToolIDs = await ConversationParser.shared.completedToolIds(for: metadata.sessionID)
+        let allToolResults = await ConversationParser.shared.toolResults(for: metadata.sessionID)
+        let allStructuredResults = await ConversationParser.shared.structuredResults(for: metadata.sessionID)
+        let parsedConversationInfo = await ConversationParser.shared.parse(
             sessionId: metadata.sessionID,
             cwd: metadata.cwd
         )
+        let clearBoundary = clearedAtBySessionID[metadata.sessionID]
+        let messages = ProjectionRuntimeBuilder.filteredMessages(
+            from: parsedMessages,
+            after: clearBoundary
+        )
+        let visibleToolIDs = ProjectionRuntimeBuilder.visibleToolIDs(in: messages)
+        let completedToolIDs = allCompletedToolIDs.intersection(visibleToolIDs)
+        let toolResults = allToolResults.filter { visibleToolIDs.contains($0.key) }
+        let structuredResults = allStructuredResults.filter { visibleToolIDs.contains($0.key) }
+        let conversationInfo = clearBoundary == nil
+            ? parsedConversationInfo
+            : ProjectionRuntimeBuilder.buildConversationInfo(from: messages)
 
-        var chatItems: [ChatHistoryItem] = []
-        var existingIDs = Set<String>()
-        var toolTracker = ToolTracker()
-        var subagentState = SubagentState()
-
-        for message in messages {
-            for (index, block) in message.content.enumerated() {
-                guard let item = ProjectionCompatibilityBuilder.createChatItem(
-                    from: block,
-                    message: message,
-                    blockIndex: index,
-                    existingIDs: existingIDs,
-                    completedTools: completedToolIDs,
-                    toolResults: toolResults,
-                    structuredResults: structuredResults,
-                    toolTracker: &toolTracker
-                ) else {
-                    continue
-                }
-                existingIDs.insert(item.id)
-                chatItems.append(item)
-            }
-        }
-
-        ProjectionCompatibilityBuilder.populateSubagentArtifacts(
-            chatItems: &chatItems,
-            subagentState: &subagentState,
+        let built = ProjectionRuntimeBuilder.buildArtifacts(
+            messages: messages,
+            completedToolIDs: completedToolIDs,
+            toolResults: toolResults,
+            structuredResults: structuredResults,
             cwd: metadata.cwd,
-            structuredResults: structuredResults
+            adapterID: metadata.runtimeIdentity.adapterID
         )
 
         return ProjectionHydratedArtifacts(
             conversationInfo: conversationInfo,
-            chatItems: chatItems.sorted { $0.timestamp < $1.timestamp },
-            subagentState: subagentState,
-            lastUpdatedAt: max(chatItems.last?.timestamp ?? metadata.lastActivity, metadata.lastActivity)
+            timeline: built.timeline,
+            messages: built.messages,
+            tools: built.tools,
+            agentDescriptions: built.agentDescriptions,
+            lastUpdatedAt: max(built.timeline.last?.timestamp ?? metadata.lastActivity, metadata.lastActivity)
         )
     }
 
     private func buildSnapshot(
         from metadataList: [ProjectionRuntimeMetadata],
-        artifactsBySessionID: [String: ProjectionHydratedArtifacts]
+        artifactsBySessionID: [String: ProjectionHydratedArtifacts],
+        previousConversations: [String: ProjectedConversationState],
+        archivedSessionIDs: Set<String>
     ) -> SessionProjectionSnapshot {
         let conversations = Dictionary(
             uniqueKeysWithValues: metadataList.map { metadata in
                 let artifacts = artifactsBySessionID[metadata.sessionID]
+                var projected = ProjectionRuntimeBuilder.buildProjectedConversationState(
+                    metadata: metadata,
+                    artifacts: artifacts
+                )
+                if let previousConversation = previousConversations[metadata.sessionID] {
+                    projected.sessionCommandSubmissionStates = previousConversation.sessionCommandSubmissionStates
+                    projected.approvals = ProjectionRuntimeBuilder.mergeApprovalSubmissionStates(
+                        current: projected.approvals,
+                        previous: previousConversation.approvals
+                    )
+                    projected.choices = ProjectionRuntimeBuilder.mergeChoiceSubmissionStates(
+                        current: projected.choices,
+                        previous: previousConversation.choices
+                    )
+                }
+                if archivedSessionIDs.contains(metadata.sessionID) {
+                    projected.status = .archived
+                    projected.lastTransition = .statusChanged
+                }
                 return (
                     metadata.sessionID,
-                    ProjectionCompatibilityBuilder.buildProjectedConversationState(
-                        metadata: metadata,
-                        artifacts: artifacts
-                    )
-                )
-            }
-        )
-
-        let capabilities = Dictionary(
-            uniqueKeysWithValues: Dictionary(
-                uniqueKeysWithValues: metadataList.map { ($0.runtimeIdentity.adapterID.rawValue, $0.runtimeIdentity.adapterID) }
-            ).values.map { adapterID in
-                (
-                    adapterID,
-                    ProjectionCompatibilityBuilder.defaultCapabilities(
-                        for: adapterID
-                    )
+                    projected
                 )
             }
         )
@@ -445,54 +583,577 @@ actor ProjectionBootstrap {
         )
     }
 
-    private func buildCompatibilitySessions(
+    private func buildUISessions(
         snapshot: SessionProjectionSnapshot,
-        artifactsBySessionID: [String: ProjectionHydratedArtifacts]
-    ) -> [SessionState] {
-        snapshot.conversations.keys.compactMap { sessionID in
-            guard let metadata = runtimeMetadataBySessionID[sessionID],
-                  let conversation = snapshot.conversations[sessionID] else {
-                return nil
+        hiddenSessionIDs: Set<String>
+    ) -> [String: ProjectedSessionViewState] {
+        Dictionary(
+            uniqueKeysWithValues: snapshot.conversations.compactMap { sessionID, conversation -> (String, ProjectedSessionViewState)? in
+                guard !hiddenSessionIDs.contains(sessionID) else { return nil }
+                guard let metadata = runtimeMetadataBySessionID[sessionID] else { return nil }
+                let artifacts = artifactsBySessionID[sessionID]
+                    ?? ProjectionRuntimeBuilder.fallbackArtifacts(from: conversation, adapterID: conversation.adapterID)
+                let prompt = metadata.activePrompt
+                    ?? ProjectionRuntimeBuilder.prompt(from: conversation, sessionID: sessionID, agentID: metadata.agentID)
+                let displayTitle = conversation.title
+                    ?? artifacts.conversationInfo.summary
+                    ?? artifacts.conversationInfo.firstUserMessage
+                    ?? URL(fileURLWithPath: metadata.cwd).lastPathComponent
+                let pendingToolName = prompt.flatMap(\.toolName)
+                    ?? prompt?.toolUseID.flatMap { toolUseID in
+                        conversation.tools.first(where: { $0.id == toolUseID })?.name
+                    }
+                let pendingToolInput = prompt.flatMap(\.toolInputPreview)
+                    ?? prompt?.toolUseID.flatMap { toolUseID in
+                        conversation.tools.first(where: { $0.id == toolUseID })
+                            .flatMap { tool in
+                                ProjectionRuntimeBuilder.toolInputPreview(from: tool)
+                            }
+                    }
+
+                return (
+                    sessionID,
+                    ProjectedSessionViewState(
+                        sessionID: sessionID,
+                        adapterID: conversation.adapterID,
+                        familyID: conversation.familyID,
+                        agentID: metadata.agentID,
+                        title: displayTitle,
+                        cwd: metadata.cwd,
+                        pid: metadata.pid,
+                        tty: metadata.tty,
+                        isInTmux: metadata.isInTmux,
+                        phase: metadata.phase,
+                        prompt: prompt,
+                        pendingInteractionCount: prompt == nil ? 0 : 1,
+                        lastActivity: metadata.lastActivity,
+                        createdAt: metadata.createdAt,
+                        messages: conversation.messages,
+                        tools: conversation.tools,
+                        timeline: artifacts.timeline,
+                        agentDescriptions: artifacts.agentDescriptions,
+                        firstUserMessage: artifacts.conversationInfo.firstUserMessage,
+                        lastUserMessage: artifacts.conversationInfo.lastUserMessage,
+                        lastUserMessageDate: artifacts.conversationInfo.lastUserMessageDate,
+                        lastMessage: artifacts.conversationInfo.lastMessage,
+                        lastMessageRole: artifacts.conversationInfo.lastMessageRole,
+                        lastToolName: artifacts.conversationInfo.lastToolName,
+                        pendingToolName: pendingToolName,
+                        pendingToolInput: pendingToolInput
+                    )
+                )
             }
-            return ProjectionCompatibilityBuilder.buildCompatibilitySessionState(
-                metadata: metadata,
-                conversation: conversation,
-                artifacts: artifactsBySessionID[sessionID]
-            )
+        )
+    }
+
+    private func determineTmuxState(pid: Int?, tty: String?) -> Bool {
+        if let pid {
+            let tree = ProcessTreeBuilder.shared.buildTree()
+            return ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
         }
-        .sorted { lhs, rhs in
-            if lhs.needsAttention != rhs.needsAttention {
-                return lhs.needsAttention && !rhs.needsAttention
-            }
-            let leftDate = lhs.lastUserMessageDate ?? lhs.lastActivity
-            let rightDate = rhs.lastUserMessageDate ?? rhs.lastActivity
-            return leftDate > rightDate
+        return tty != nil
+    }
+
+    func resolvedTmuxState(
+        pid: Int?,
+        tty: String?,
+        existing: ProjectionRuntimeMetadata?
+    ) -> Bool {
+        if let existing,
+           existing.pid == pid,
+           existing.tty == tty {
+            return existing.isInTmux
         }
+        return determineTmuxState(pid: pid, tty: tty)
     }
 }
 
-private enum ProjectionCompatibilityBuilder {
+private enum ProjectionRuntimeBuilder {
+    struct BuiltArtifacts: Sendable {
+        let timeline: [ProjectedTimelineItemState]
+        let messages: [ProjectedMessageState]
+        let tools: [ProjectedToolState]
+        let agentDescriptions: [String: String]
+    }
+
+    static func filteredMessages(
+        from messages: [ChatMessage],
+        after clearBoundary: Date?
+    ) -> [ChatMessage] {
+        guard let clearBoundary else { return messages }
+        return messages.filter { $0.timestamp > clearBoundary }
+    }
+
+    static func visibleToolIDs(in messages: [ChatMessage]) -> Set<String> {
+        Set(
+            messages.flatMap { message in
+                message.content.compactMap { block -> String? in
+                    guard case .toolUse(let tool) = block else { return nil }
+                    return tool.id
+                }
+            }
+        )
+    }
+
+    static func buildConversationInfo(from messages: [ChatMessage]) -> ConversationInfo {
+        let userMessages = messages.compactMap { message -> (String, Date)? in
+            guard message.role == .user else { return nil }
+            let text = message.textContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return (text, message.timestamp)
+        }
+
+        let lastVisible = messages.reversed().compactMap { message -> (String?, String?, String?)? in
+            for block in message.content.reversed() {
+                switch block {
+                case .text(let text):
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    return (trimmed, message.role.rawValue, nil)
+                case .thinking(let text):
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    return (trimmed, ChatRole.assistant.rawValue, nil)
+                case .toolUse(let tool):
+                    return (tool.preview.isEmpty ? nil : tool.preview, "tool", tool.name)
+                case .interrupted:
+                    return ("[Request interrupted by user]", ChatRole.assistant.rawValue, nil)
+                }
+            }
+            return nil
+        }
+        .first
+
+        return ConversationInfo(
+            summary: userMessages.first?.0,
+            lastMessage: lastVisible?.0,
+            lastMessageRole: lastVisible?.1,
+            lastToolName: lastVisible?.2,
+            firstUserMessage: userMessages.first?.0,
+            lastUserMessage: userMessages.last?.0,
+            lastUserMessageDate: userMessages.last?.1
+        )
+    }
+
+    static func emptyArtifacts(
+        summary: String?,
+        lastUpdatedAt: Date
+    ) -> ProjectionHydratedArtifacts {
+        ProjectionHydratedArtifacts(
+            conversationInfo: ConversationInfo(
+                summary: summary,
+                lastMessage: nil,
+                lastMessageRole: nil,
+                lastToolName: nil,
+                firstUserMessage: summary,
+                lastUserMessage: nil,
+                lastUserMessageDate: nil
+            ),
+            timeline: [],
+            messages: [],
+            tools: [],
+            agentDescriptions: [:],
+            lastUpdatedAt: lastUpdatedAt
+        )
+    }
+
+    static func clearedArtifacts(from base: ProjectionHydratedArtifacts) -> ProjectionHydratedArtifacts {
+        ProjectionHydratedArtifacts(
+            conversationInfo: ConversationInfo(
+                summary: base.conversationInfo.summary,
+                lastMessage: nil,
+                lastMessageRole: nil,
+                lastToolName: nil,
+                firstUserMessage: base.conversationInfo.firstUserMessage,
+                lastUserMessage: nil,
+                lastUserMessageDate: nil
+            ),
+            timeline: [],
+            messages: [],
+            tools: [],
+            agentDescriptions: base.agentDescriptions,
+            lastUpdatedAt: base.lastUpdatedAt
+        )
+    }
+
+    static func mergeApprovalSubmissionStates(
+        current: [ProjectedApprovalState],
+        previous: [ProjectedApprovalState]
+    ) -> [ProjectedApprovalState] {
+        current.map { approval in
+            guard let previousApproval = previous.first(where: { $0.id == approval.id }) else {
+                return approval
+            }
+
+            var merged = approval
+            merged.submissionState = previousApproval.submissionState
+            merged.resolvedBy = previousApproval.resolvedBy ?? approval.resolvedBy
+            merged.updatedAt = max(previousApproval.updatedAt, approval.updatedAt)
+            return merged
+        }
+    }
+
+    static func mergeChoiceSubmissionStates(
+        current: [ProjectedChoiceState],
+        previous: [ProjectedChoiceState]
+    ) -> [ProjectedChoiceState] {
+        current.map { choice in
+            guard let previousChoice = previous.first(where: { $0.id == choice.id }) else {
+                return choice
+            }
+
+            var merged = choice
+            merged.submissionState = previousChoice.submissionState
+            merged.submittedBy = previousChoice.submittedBy ?? choice.submittedBy
+            merged.resolvedBy = previousChoice.resolvedBy ?? choice.resolvedBy
+            merged.updatedAt = max(previousChoice.updatedAt, choice.updatedAt)
+            return merged
+        }
+    }
+
+    static func buildArtifacts(
+        messages: [ChatMessage],
+        completedToolIDs: Set<String>,
+        toolResults: [String: ConversationParser.ToolResult],
+        structuredResults: [String: ToolResultData],
+        cwd: String,
+        adapterID: RuntimeAdapterID
+    ) -> BuiltArtifacts {
+        var timeline: [ProjectedTimelineItemState] = []
+        var projectedMessages: [ProjectedMessageState] = []
+        var projectedTools: [ProjectedToolState] = []
+        var agentDescriptions: [String: String] = [:]
+        var seenMessageIDs = Set<String>()
+
+        for message in messages {
+            for (index, block) in message.content.enumerated() {
+                switch block {
+                case .text(let text):
+                    let itemID = "\(message.id)-text-\(index)"
+                    guard seenMessageIDs.insert(itemID).inserted else { continue }
+                    let role: CanonicalMessageRole = message.role == .user ? .user : .assistant
+                    projectedMessages.append(
+                        ProjectedMessageState(
+                            id: itemID,
+                            turnID: nil,
+                            role: role,
+                            format: .markdown,
+                            text: text,
+                            isFinal: true,
+                            sourceKind: .transcript,
+                            updatedAt: message.timestamp
+                        )
+                    )
+                    timeline.append(
+                        ProjectedTimelineItemState(
+                            id: itemID,
+                            content: message.role == .user ? .user(text) : .assistant(text),
+                            timestamp: message.timestamp
+                        )
+                    )
+
+                case .thinking(let text):
+                    let itemID = "\(message.id)-thinking-\(index)"
+                    guard seenMessageIDs.insert(itemID).inserted else { continue }
+                    projectedMessages.append(
+                        ProjectedMessageState(
+                            id: itemID,
+                            turnID: nil,
+                            role: .assistant,
+                            format: .text,
+                            text: text,
+                            isFinal: false,
+                            sourceKind: .transcript,
+                            updatedAt: message.timestamp
+                        )
+                    )
+                    timeline.append(
+                        ProjectedTimelineItemState(
+                            id: itemID,
+                            content: .thinking(text),
+                            timestamp: message.timestamp
+                        )
+                    )
+
+                case .interrupted:
+                    let itemID = "\(message.id)-interrupted-\(index)"
+                    guard seenMessageIDs.insert(itemID).inserted else { continue }
+                    timeline.append(
+                        ProjectedTimelineItemState(
+                            id: itemID,
+                            content: .interrupted,
+                            timestamp: message.timestamp
+                        )
+                    )
+
+                case .toolUse(let tool):
+                    let status: ToolStatus
+                    if completedToolIDs.contains(tool.id) {
+                        if toolResults[tool.id]?.isInterrupted == true {
+                            status = .interrupted
+                        } else if toolResults[tool.id]?.isError == true {
+                            status = .error
+                        } else {
+                            status = .success
+                        }
+                    } else {
+                        status = .running
+                    }
+
+                    var resultText: String?
+                    if let parserResult = toolResults[tool.id] {
+                        resultText = parserResult.stdout
+                        if resultText?.isEmpty != false { resultText = parserResult.stderr }
+                        if resultText?.isEmpty != false { resultText = parserResult.content }
+                    }
+
+                    var subagentTools: [SubagentToolCall] = []
+                    if let structuredResult = structuredResults[tool.id],
+                       case .task(let taskResult) = structuredResult,
+                       !taskResult.agentId.isEmpty {
+                        if let descriptionBinding = RuntimeSemanticRegistry
+                            .semanticPlane(for: adapterID)?
+                            .agentDescription(
+                                name: tool.name,
+                                input: tool.input,
+                                structuredResult: structuredResult
+                            ) {
+                            agentDescriptions[descriptionBinding.agentID] = descriptionBinding.description
+                        }
+
+                        let subagentToolInfos = ConversationParser.parseSubagentToolsSync(
+                            agentId: taskResult.agentId,
+                            cwd: cwd
+                        )
+                        subagentTools = subagentToolInfos.map { info in
+                            SubagentToolCall(
+                                id: info.id,
+                                name: info.name,
+                                input: info.input,
+                                status: info.isCompleted ? .success : .running,
+                                timestamp: parseTimestamp(info.timestamp) ?? message.timestamp
+                            )
+                        }
+                    }
+
+                    let toolCall = ToolCallItem(
+                        name: tool.name,
+                        input: tool.input,
+                        status: status,
+                        result: resultText,
+                        structuredResult: structuredResults[tool.id],
+                        subagentTools: subagentTools,
+                        headerDetailText: RuntimeSemanticRegistry
+                            .semanticPlane(for: adapterID)?
+                            .toolHeaderDetail(
+                            name: tool.name,
+                            input: tool.input,
+                            structuredResult: structuredResults[tool.id],
+                            agentDescriptions: agentDescriptions
+                        ),
+                        pendingDetailsText: RuntimeSemanticRegistry
+                            .semanticPlane(for: adapterID)?
+                            .toolPendingDetails(
+                            name: tool.name,
+                            input: tool.input,
+                            status: status
+                        )
+                    )
+
+                    projectedTools.append(
+                        ProjectedToolState(
+                            id: tool.id,
+                            name: tool.name,
+                            kind: canonicalToolKind(for: tool.name),
+                            input: tool.input.mapValues(AnyCodable.init),
+                            output: projectedToolOutput(from: toolCall),
+                            state: projectedToolState(for: status),
+                            errorKind: status == .error ? .runtimeError : nil,
+                            updatedAt: message.timestamp
+                        )
+                    )
+                    timeline.append(
+                        ProjectedTimelineItemState(
+                            id: tool.id,
+                            content: .tool(toolCall),
+                            timestamp: message.timestamp
+                        )
+                    )
+                }
+            }
+        }
+
+        timeline.sort {
+            if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+            return $0.id < $1.id
+        }
+        projectedMessages.sort {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+            return $0.id < $1.id
+        }
+        projectedTools.sort {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+            return $0.id < $1.id
+        }
+
+        return BuiltArtifacts(
+            timeline: timeline,
+            messages: projectedMessages,
+            tools: projectedTools,
+            agentDescriptions: agentDescriptions
+        )
+    }
+
+    static func fallbackArtifacts(
+        from conversation: ProjectedConversationState,
+        adapterID: RuntimeAdapterID
+    ) -> ProjectionHydratedArtifacts {
+        let timelineMessages = conversation.messages.map { message -> ProjectedTimelineItemState in
+            let content: ProjectedTimelineItemContent
+            switch message.role {
+            case .user:
+                content = .user(message.text)
+            case .assistant, .system, .tool:
+                content = .assistant(message.text)
+            }
+            return ProjectedTimelineItemState(
+                id: message.id,
+                content: content,
+                timestamp: message.updatedAt
+            )
+        }
+
+        let timelineTools = conversation.tools.map { tool -> ProjectedTimelineItemState in
+            let flattenedInput = tool.input.compactMapValues { any in
+                switch any.value {
+                case let value as String:
+                    return value
+                case let value as Int:
+                    return String(value)
+                case let value as Double:
+                    return String(value)
+                case let value as Bool:
+                    return value ? "true" : "false"
+                default:
+                    return nil
+                }
+            }
+            let toolCall = ToolCallItem(
+                name: tool.name,
+                input: flattenedInput,
+                status: toolStatus(from: tool.state),
+                result: tool.output["text"]?.value as? String,
+                structuredResult: nil,
+                subagentTools: [],
+                headerDetailText: RuntimeSemanticRegistry
+                    .semanticPlane(for: adapterID)?
+                    .toolHeaderDetail(
+                    name: tool.name,
+                    input: flattenedInput,
+                    structuredResult: nil,
+                    agentDescriptions: [:]
+                ),
+                pendingDetailsText: RuntimeSemanticRegistry
+                    .semanticPlane(for: adapterID)?
+                    .toolPendingDetails(
+                    name: tool.name,
+                    input: flattenedInput,
+                    status: toolStatus(from: tool.state)
+                )
+            )
+            return ProjectedTimelineItemState(
+                id: tool.id,
+                content: .tool(toolCall),
+                timestamp: tool.updatedAt
+            )
+        }
+
+        let timeline = (timelineMessages + timelineTools).sorted {
+            if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+            return $0.id < $1.id
+        }
+
+        let sortedMessages = conversation.messages.sorted { $0.updatedAt < $1.updatedAt }
+        let lastMessage = sortedMessages.last?.text ?? conversation.tools.sorted { $0.updatedAt < $1.updatedAt }.last?.name
+        let lastMessageRole = sortedMessages.last?.role.rawValue
+        let lastToolName = conversation.tools.sorted { $0.updatedAt < $1.updatedAt }.last?.name
+        let firstUserMessage = sortedMessages.first(where: { $0.role == .user })?.text ?? conversation.title
+        let lastUserMessage = sortedMessages.last(where: { $0.role == .user })?.text
+        let lastUserMessageDate = sortedMessages.last(where: { $0.role == .user })?.updatedAt
+
+        return ProjectionHydratedArtifacts(
+            conversationInfo: ConversationInfo(
+                summary: conversation.title,
+                lastMessage: lastMessage,
+                lastMessageRole: lastMessageRole,
+                lastToolName: lastToolName,
+                firstUserMessage: firstUserMessage,
+                lastUserMessage: lastUserMessage,
+                lastUserMessageDate: lastUserMessageDate
+            ),
+            timeline: timeline,
+            messages: conversation.messages,
+            tools: conversation.tools,
+            agentDescriptions: [:],
+            lastUpdatedAt: conversation.lastUpdatedAt
+        )
+    }
+
     static func buildProjectedConversationState(
         metadata: ProjectionRuntimeMetadata,
         artifacts: ProjectionHydratedArtifacts?
     ) -> ProjectedConversationState {
-        let toolStates = buildProjectedTools(from: artifacts?.chatItems ?? [])
-        let approvalState = buildApprovalState(from: metadata)
-        let choiceState = buildChoiceState(from: metadata)
-        let projectedMessages = buildProjectedMessages(from: artifacts?.chatItems ?? [])
+        let approvalState = metadata.activePrompt.flatMap { prompt -> ProjectedApprovalState? in
+            guard prompt.kind == .approval else { return nil }
+            return ProjectedApprovalState(
+                id: prompt.id,
+                toolID: prompt.toolUseID,
+                kind: .tool,
+                reason: prompt.question,
+                options: [.allowOnce, .deny, .cancel],
+                scope: .once,
+                strength: .strong,
+                domainState: .requested,
+                submissionState: .idle,
+                resolvedBy: nil,
+                updatedAt: prompt.createdAt
+            )
+        }
+
+        let choiceState = metadata.activePrompt.flatMap { prompt -> ProjectedChoiceState? in
+            guard prompt.kind == .choice else { return nil }
+            return ProjectedChoiceState(
+                id: prompt.id,
+                toolID: prompt.toolUseID,
+                kind: .options,
+                prompt: prompt.question,
+                schema: [:],
+                options: prompt.options.map { AnyCodable($0.label) },
+                domainState: .requested,
+                submissionState: .idle,
+                submittedBy: nil,
+                resolvedBy: nil,
+                valueShape: prompt.isMultiQuestion ? .form : .options,
+                updatedAt: prompt.createdAt
+            )
+        }
+
+        let title = artifacts?.conversationInfo.summary
+            ?? artifacts?.conversationInfo.firstUserMessage
+            ?? URL(fileURLWithPath: metadata.cwd).lastPathComponent
 
         return ProjectedConversationState(
             id: metadata.sessionID,
             adapterID: metadata.runtimeIdentity.adapterID,
             familyID: metadata.runtimeIdentity.familyID,
             sourceKind: .hook,
-            title: artifacts?.conversationInfo.summary ?? artifacts?.conversationInfo.firstUserMessage ?? URL(fileURLWithPath: metadata.cwd).lastPathComponent,
+            title: title,
             cwd: metadata.cwd,
             status: projectedConversationStatus(from: metadata.phase),
             lastTransition: .statusChanged,
             turn: CanonicalTurnDescriptor(id: nil, status: projectedTurnStatus(from: metadata.phase)),
-            messages: projectedMessages,
-            tools: toolStates,
+            messages: artifacts?.messages ?? [],
+            tools: artifacts?.tools ?? [],
             approvals: approvalState.map { [$0] } ?? [],
             choices: choiceState.map { [$0] } ?? [],
             plans: [],
@@ -501,472 +1162,143 @@ private enum ProjectionCompatibilityBuilder {
         )
     }
 
-    static func buildCompatibilitySessionState(
-        metadata: ProjectionRuntimeMetadata,
-        conversation: ProjectedConversationState,
-        artifacts: ProjectionHydratedArtifacts?
-    ) -> SessionState {
-        let permissionContext = buildPermissionContext(from: conversation)
-        let activeInteraction = buildActiveInteraction(
-            metadata: metadata,
-            from: conversation,
-            permissionContext: permissionContext,
-            sessionID: metadata.sessionID,
-            agentID: metadata.agentID,
-            isInTmux: metadata.isInTmux,
-            tty: metadata.tty
-        )
-
-        var phase = metadata.phase
-        if let permissionContext {
-            phase = .waitingForApproval(permissionContext)
-        } else if activeInteraction != nil {
-            phase = .waitingForInput
-        } else if phase.isWaitingForApproval {
-            phase = .processing
-        }
-
-        var chatItems = artifacts?.chatItems ?? fallbackChatItems(from: conversation)
-        if let interaction = activeInteraction {
-            appendCompatibilityInteractionItems(
-                interaction: interaction,
-                permissionContext: permissionContext,
-                sessionID: metadata.sessionID,
-                into: &chatItems
-            )
-        }
-        chatItems.sort { $0.timestamp < $1.timestamp }
-
-        let fallbackConversationInfo = fallbackConversationInfo(
-            from: conversation,
-            cwd: metadata.cwd
-        )
-        let lastUserMessage = artifacts?.conversationInfo.lastUserMessage ?? fallbackConversationInfo.lastUserMessage
-        let firstUserMessage = artifacts?.conversationInfo.firstUserMessage ?? fallbackConversationInfo.firstUserMessage
-
-        var toolTracker = ToolTracker()
-        toolTracker.inProgress = Dictionary(
-            uniqueKeysWithValues: conversation.tools.compactMap { tool -> (String, ToolInProgress)? in
-                guard tool.state == .started || tool.state == .running else { return nil }
-                return (
-                    tool.id,
-                    ToolInProgress(
-                        id: tool.id,
-                        name: tool.name,
-                        startTime: tool.updatedAt,
-                        phase: tool.state == .started ? .starting : .running
-                    )
-                )
-            }
-        )
-        toolTracker.seenIds = Set(conversation.tools.map(\.id))
-        toolTracker.lastSyncTime = artifacts?.lastUpdatedAt
-
-        return SessionState(
-            sessionId: metadata.sessionID,
-            cwd: metadata.cwd,
-            projectName: URL(fileURLWithPath: metadata.cwd).lastPathComponent,
-            agentId: metadata.agentID,
-            pid: metadata.pid,
-            tty: metadata.tty,
-            isInTmux: metadata.isInTmux,
-            phase: phase,
-            chatItems: chatItems,
-            toolTracker: toolTracker,
-            subagentState: artifacts?.subagentState ?? SubagentState(),
-            conversationInfo: ConversationInfo(
-                summary: artifacts?.conversationInfo.summary ?? fallbackConversationInfo.summary,
-                lastMessage: artifacts?.conversationInfo.lastMessage ?? fallbackConversationInfo.lastMessage,
-                lastMessageRole: artifacts?.conversationInfo.lastMessageRole ?? fallbackConversationInfo.lastMessageRole,
-                lastToolName: artifacts?.conversationInfo.lastToolName ?? fallbackConversationInfo.lastToolName,
-                firstUserMessage: firstUserMessage,
-                lastUserMessage: lastUserMessage,
-                lastUserMessageDate: artifacts?.conversationInfo.lastUserMessageDate ?? fallbackConversationInfo.lastUserMessageDate
-            ),
-            normalizedInteraction: activeInteraction?.origin == .normalizedHook ? activeInteraction : nil,
-            activeInteraction: activeInteraction,
-            pendingInteractionCount: activeInteraction == nil ? 0 : 1,
-            lastActivity: metadata.lastActivity,
-            createdAt: metadata.createdAt
-        )
-    }
-
-    static func createChatItem(
-        from block: MessageBlock,
-        message: ChatMessage,
-        blockIndex: Int,
-        existingIDs: Set<String>,
-        completedTools: Set<String>,
-        toolResults: [String: ConversationParser.ToolResult],
-        structuredResults: [String: ToolResultData],
-        toolTracker: inout ToolTracker
-    ) -> ChatHistoryItem? {
-        switch block {
-        case .text(let text):
-            let itemID = "\(message.id)-text-\(blockIndex)"
-            guard !existingIDs.contains(itemID) else { return nil }
-            if message.role == .user {
-                return ChatHistoryItem(id: itemID, type: .user(text), timestamp: message.timestamp)
-            }
-            return ChatHistoryItem(id: itemID, type: .assistant(text), timestamp: message.timestamp)
-
-        case .toolUse(let tool):
-            guard toolTracker.markSeen(tool.id) else { return nil }
-
-            let isCompleted = completedTools.contains(tool.id)
-            let status: ToolStatus = isCompleted ? .success : .running
-
-            var resultText: String?
-            if isCompleted, let parserResult = toolResults[tool.id] {
-                if let stdout = parserResult.stdout, !stdout.isEmpty {
-                    resultText = stdout
-                } else if let stderr = parserResult.stderr, !stderr.isEmpty {
-                    resultText = stderr
-                } else if let content = parserResult.content, !content.isEmpty {
-                    resultText = content
-                }
-            }
-
-            return ChatHistoryItem(
-                id: tool.id,
-                type: .toolCall(
-                    ToolCallItem(
-                        name: tool.name,
-                        input: tool.input,
-                        status: status,
-                        result: resultText,
-                        structuredResult: structuredResults[tool.id],
-                        subagentTools: []
-                    )
-                ),
-                timestamp: message.timestamp
-            )
-
-        case .thinking(let text):
-            let itemID = "\(message.id)-thinking-\(blockIndex)"
-            guard !existingIDs.contains(itemID) else { return nil }
-            return ChatHistoryItem(id: itemID, type: .thinking(text), timestamp: message.timestamp)
-
-        case .interrupted:
-            let itemID = "\(message.id)-interrupted-\(blockIndex)"
-            guard !existingIDs.contains(itemID) else { return nil }
-            return ChatHistoryItem(id: itemID, type: .interrupted, timestamp: message.timestamp)
-        }
-    }
-
-    static func populateSubagentArtifacts(
-        chatItems: inout [ChatHistoryItem],
-        subagentState: inout SubagentState,
-        cwd: String,
-        structuredResults: [String: ToolResultData]
-    ) {
-        for index in 0..<chatItems.count {
-            guard case .toolCall(var tool) = chatItems[index].type,
-                  tool.name == "Task",
-                  let structuredResult = structuredResults[chatItems[index].id],
-                  case .task(let taskResult) = structuredResult,
-                  !taskResult.agentId.isEmpty else {
-                continue
-            }
-
-            if let description = tool.input["description"] {
-                subagentState.agentDescriptions[taskResult.agentId] = description
-            }
-
-            let subagentToolInfos = ConversationParser.parseSubagentToolsSync(
-                agentId: taskResult.agentId,
-                cwd: cwd
-            )
-            tool.subagentTools = subagentToolInfos.map { info in
-                SubagentToolCall(
-                    id: info.id,
-                    name: info.name,
-                    input: info.input,
-                    status: info.isCompleted ? .success : .running,
-                    timestamp: parseTimestamp(info.timestamp) ?? Date()
-                )
-            }
-
-            chatItems[index] = ChatHistoryItem(
-                id: chatItems[index].id,
-                type: .toolCall(tool),
-                timestamp: chatItems[index].timestamp
-            )
-        }
-    }
-
-    static func defaultCapabilities(
-        for adapterID: RuntimeAdapterID
-    ) -> [CanonicalSemanticArea: AdapterCapabilitySnapshot] {
-        let supportedAreas: [CanonicalSemanticArea] = [
-            .conversationLifecycle,
-            .messageFinal,
-            .toolLifecycle,
-            .approvalRequest,
-            .userChoiceRequest,
-            .sessionFocus,
-            .sessionArchive
-        ]
-
-        return Dictionary(
-            uniqueKeysWithValues: supportedAreas.map { area in
-                (
-                    area,
-                    AdapterCapabilitySnapshot(
-                        adapterID: adapterID,
-                        semanticArea: area,
-                        level: .desktopFallback,
-                        source: .localState,
-                        control: .localFallback,
-                        notes: "Phase 1 bootstrap compatibility capability"
-                    )
-                )
-            }
-        )
-    }
-
-    private static func buildProjectedMessages(from chatItems: [ChatHistoryItem]) -> [ProjectedMessageState] {
-        chatItems.compactMap { item -> ProjectedMessageState? in
-            switch item.type {
-            case .user(let text):
-                return ProjectedMessageState(
-                    id: item.id,
-                    turnID: nil,
-                    role: .user,
-                    format: .markdown,
-                    text: text,
-                    isFinal: true,
-                    sourceKind: .transcript,
-                    updatedAt: item.timestamp
-                )
-            case .assistant(let text):
-                return ProjectedMessageState(
-                    id: item.id,
-                    turnID: nil,
-                    role: .assistant,
-                    format: .markdown,
-                    text: text,
-                    isFinal: true,
-                    sourceKind: .transcript,
-                    updatedAt: item.timestamp
-                )
-            case .thinking(let text):
-                return ProjectedMessageState(
-                    id: item.id,
-                    turnID: nil,
-                    role: .assistant,
-                    format: .text,
-                    text: text,
-                    isFinal: false,
-                    sourceKind: .transcript,
-                    updatedAt: item.timestamp
-                )
-            case .interrupted, .toolCall:
-                return nil
-            }
-        }
-    }
-
-    private static func buildProjectedTools(from chatItems: [ChatHistoryItem]) -> [ProjectedToolState] {
-        chatItems.compactMap { item -> ProjectedToolState? in
-            guard case .toolCall(let tool) = item.type else { return nil }
-            return ProjectedToolState(
-                id: item.id,
-                name: tool.name,
-                kind: canonicalToolKind(for: tool.name),
-                input: tool.input.mapValues(AnyCodable.init),
-                output: projectedToolOutput(from: tool),
-                state: projectedToolState(for: tool.status),
-                errorKind: tool.status == .error ? .runtimeError : nil,
-                updatedAt: item.timestamp
-            )
-        }
-    }
-
-    private static func buildPermissionContext(from conversation: ProjectedConversationState) -> PermissionContext? {
-        guard let approval = conversation.approvals.first(where: { $0.domainState == .requested }) else {
-            return nil
-        }
-
-        let toolInput = conversation.tools.first(where: { $0.id == approval.toolID })?.input
-        return PermissionContext(
-            toolUseId: approval.toolID ?? approval.id,
-            toolName: conversation.tools.first(where: { $0.id == approval.toolID })?.name ?? "unknown",
-            toolInput: toolInput,
-            receivedAt: approval.updatedAt
-        )
-    }
-
-    private static func buildApprovalState(from metadata: ProjectionRuntimeMetadata) -> ProjectedApprovalState? {
-        guard case .waitingForApproval(let permission) = metadata.phase else {
-            return nil
-        }
-
-        return ProjectedApprovalState(
-            id: permission.toolUseId,
-            toolID: permission.toolUseId,
-            kind: .tool,
-            reason: "Permission required",
-            options: [.allowOnce, .deny, .cancel],
-            scope: .once,
-            strength: .strong,
-            domainState: .requested,
-            submissionState: .idle,
-            resolvedBy: nil,
-            updatedAt: permission.receivedAt
-        )
-    }
-
-    private static func buildChoiceState(from metadata: ProjectionRuntimeMetadata) -> ProjectedChoiceState? {
-        guard metadata.phase == .waitingForInput else { return nil }
-
-        let interaction = metadata.activeInteraction
-        return ProjectedChoiceState(
-            id: interaction?.toolUseId ?? "\(metadata.sessionID)-interaction",
-            toolID: interaction?.toolUseId,
-            kind: .options,
-            prompt: interaction?.question,
-            schema: [:],
-            options: interaction?.options.map { AnyCodable($0.label) } ?? [],
-            domainState: .requested,
-            submissionState: .idle,
-            submittedBy: nil,
-            resolvedBy: nil,
-            valueShape: .options,
-            updatedAt: metadata.lastActivity
-        )
-    }
-
-    private static func buildActiveInteraction(
-        metadata: ProjectionRuntimeMetadata,
-        from conversation: ProjectedConversationState,
-        permissionContext: PermissionContext?,
+    static func prompt(
+        from conversation: ProjectedConversationState?,
         sessionID: String,
-        agentID: String,
-        isInTmux: Bool,
-        tty: String?
-    ) -> SessionInteractionRequest? {
-        let submitMode = SessionInteractionRequest.submitMode(isInTmux: isInTmux, tty: tty)
+        agentID: String
+    ) -> ProjectedPromptState? {
+        guard let conversation else { return nil }
 
-        if let permissionContext {
-            return SessionInteractionRequest.from(
-                permission: permissionContext,
-                sessionId: sessionID,
-                agentId: agentID,
-                submitMode: submitMode
+        if let approval = conversation.approvals.first(where: { $0.domainState == .requested }) {
+            let tool = approval.toolID.flatMap { toolID in
+                conversation.tools.first(where: { $0.id == toolID })
+            }
+            let promptText = approval.reason ?? "Allow this tool to run?"
+            let question = ProjectedInteractionQuestionState(
+                id: "permission-\(approval.id)",
+                header: "Permission required",
+                question: promptText,
+                options: RuntimeSemanticSupport.approvalOptions()
+            )
+            return ProjectedPromptState(
+                id: approval.id,
+                sessionID: sessionID,
+                toolUseID: approval.toolID ?? approval.id,
+                toolName: tool?.name,
+                toolInputPreview: tool.flatMap { tool in
+                    ProjectionRuntimeBuilder.toolInputPreview(from: tool)
+                },
+                sourceAgentID: agentID,
+                kind: .approval,
+                title: "Permission required",
+                questions: [question],
+                preferredOptionID: "allow",
+                createdAt: approval.updatedAt,
+                responseCapability: .nativeHookAvailable,
+                submissionEncoding: .optionValue,
+                programmaticStrategy: .none,
+                sourceToolInputJSON: nil
             )
         }
 
-        guard let choice = conversation.choices.first(where: {
+        if let choice = conversation.choices.first(where: {
             $0.domainState == .requested || $0.submissionState == .submissionPending
-        }) else {
-            return nil
-        }
-
-        if let activeInteraction = metadata.activeInteraction {
-            return activeInteraction
-        }
-
-        let options = choice.options.compactMap { any -> QuestionOption? in
-            guard let label = any.value as? String else { return nil }
-            return QuestionOption(label: label, description: nil)
-        }
-
-        let result = AskUserQuestionResult(
-            questions: [
-                QuestionItem(
-                    id: choice.id,
-                    question: choice.prompt ?? "Choose an option",
-                    header: "Choose",
-                    options: options
+        }) {
+            let options = choice.options.enumerated().compactMap { index, option -> ProjectedInteractionOptionState? in
+                guard let label = option.value as? String, !label.isEmpty else { return nil }
+                return ProjectedInteractionOptionState(
+                    id: "\(index)-\(label)",
+                    label: label,
+                    submissionValue: String(index + 1),
+                    detail: nil,
+                    role: index == 0 ? .primary : .secondary
                 )
-            ],
-            answers: [:]
-        )
-
-        return SessionInteractionRequest.from(
-            askUserQuestionResult: result,
-            sessionId: sessionID,
-            toolUseId: choice.toolID ?? choice.id,
-            createdAt: choice.updatedAt,
-            agentId: agentID,
-            submitMode: submitMode
-        )
-    }
-
-    private static func appendCompatibilityInteractionItems(
-        interaction: SessionInteractionRequest,
-        permissionContext: PermissionContext?,
-        sessionID: String,
-        into chatItems: inout [ChatHistoryItem]
-    ) {
-        let syntheticPrefix = "live-interaction-\(sessionID)-"
-        let detailItemID = "\(syntheticPrefix)\(interaction.id)"
-        let detailItem = ChatHistoryItem(
-            id: detailItemID,
-            type: .assistant(formattedInteractionSummary(interaction)),
-            timestamp: interaction.createdAt
-        )
-
-        chatItems.removeAll { $0.id.hasPrefix(syntheticPrefix) }
-        chatItems.append(detailItem)
-
-        guard let toolUseID = interaction.toolUseId else { return }
-        if let index = chatItems.firstIndex(where: { $0.id == toolUseID }),
-           case .toolCall(var tool) = chatItems[index].type {
-            let enrichedInput = enrichedInteractionInput(for: interaction)
-            let mergedInput = tool.input.merging(enrichedInput) { _, new in new }
-            if permissionContext?.toolUseId == toolUseID {
-                tool.status = .waitingForApproval
             }
-            chatItems[index] = ChatHistoryItem(
-                id: toolUseID,
-                type: .toolCall(
-                    ToolCallItem(
-                        name: tool.name,
-                        input: mergedInput,
-                        status: tool.status,
-                        result: tool.result,
-                        structuredResult: tool.structuredResult,
-                        resolvedFromToolUseId: tool.resolvedFromToolUseId,
-                        subagentTools: tool.subagentTools
-                    )
-                ),
-                timestamp: chatItems[index].timestamp
+            let question = ProjectedInteractionQuestionState(
+                id: choice.id,
+                header: "Choose",
+                question: choice.prompt ?? "Choose an option",
+                options: options
+            )
+            return ProjectedPromptState(
+                id: choice.id,
+                sessionID: sessionID,
+                toolUseID: choice.toolID ?? choice.id,
+                toolName: choice.toolID.flatMap { toolID in
+                    conversation.tools.first(where: { $0.id == toolID })?.name
+                },
+                toolInputPreview: choice.toolID.flatMap { toolID in
+                    conversation.tools.first(where: { $0.id == toolID }).flatMap { tool in
+                        ProjectionRuntimeBuilder.toolInputPreview(from: tool)
+                    }
+                },
+                sourceAgentID: agentID,
+                kind: .choice,
+                title: "Choose an option",
+                questions: [question],
+                preferredOptionID: options.first?.id,
+                createdAt: choice.updatedAt,
+                responseCapability: .nativeHookAvailable,
+                submissionEncoding: .optionLabel,
+                programmaticStrategy: .none,
+                sourceToolInputJSON: nil
             )
         }
+
+        return nil
     }
 
-    private static func formattedInteractionSummary(_ interaction: SessionInteractionRequest) -> String {
-        var lines: [String] = []
-        for question in interaction.questions {
-            if let header = question.header, !header.isEmpty {
-                lines.append(header)
-            }
-            lines.append(question.question)
-            for option in question.options {
-                if let detail = option.detail, !detail.isEmpty {
-                    lines.append("- \(option.label): \(detail)")
-                } else {
-                    lines.append("- \(option.label)")
-                }
-            }
+    static func runtimePhase(
+        from event: HookEvent,
+        current: ProjectedSessionRuntimePhase
+    ) -> ProjectedSessionRuntimePhase {
+        if event.event == HookEventType.preCompact.rawValue || event.status == "compacting" {
+            return .compacting
         }
-        return lines.joined(separator: "\n")
-    }
-
-    private static func enrichedInteractionInput(for interaction: SessionInteractionRequest) -> [String: String] {
-        var input: [String: String] = [:]
-        input["interaction_question"] = interaction.question
-        input["interaction_title"] = interaction.title
-        input["source_agent"] = interaction.sourceAgent
-        if let sourceToolInputJSON = interaction.sourceToolInputJSON {
-            input["source_tool_input_json"] = sourceToolInputJSON
+        if event.status == "ended" || event.event == HookEventType.sessionEnd.rawValue {
+            return .ended
         }
-        return input
+        switch event.status {
+        case "running_tool", "processing", "starting":
+            return .processing
+        case "waiting_for_input":
+            return .waitingForInput
+        case "waiting_for_approval":
+            return .waitingForApproval
+        case "idle":
+            return .idle
+        default:
+            return current
+        }
     }
 
-    private static func projectedConversationStatus(from phase: SessionPhase) -> CanonicalConversationStatus {
+    static func runtimePhase(
+        from conversation: ProjectedConversationState?,
+        activePrompt: ProjectedPromptState?
+    ) -> ProjectedSessionRuntimePhase {
+        if let activePrompt {
+            return activePrompt.kind == .approval ? .waitingForApproval : .waitingForInput
+        }
+        switch conversation?.status {
+        case .active:
+            return .processing
+        case .completed, .archived:
+            return .ended
+        case .idle, .errored, .unknown, .none:
+            return .idle
+        }
+    }
+
+    static func buildPrompt(
+        from event: HookEvent,
+        sessionID: String,
+        runtimeIdentity: RuntimeIdentity
+    ) -> ProjectedPromptState? {
+        RuntimeSemanticRegistry.semanticPlane(for: runtimeIdentity.adapterID)?
+            .promptState(from: event, sessionID: sessionID, createdAt: Date())
+    }
+
+    static func projectedConversationStatus(from phase: ProjectedSessionRuntimePhase) -> CanonicalConversationStatus {
         switch phase {
         case .processing, .compacting, .waitingForApproval, .waitingForInput:
             return .active
@@ -977,7 +1309,7 @@ private enum ProjectionCompatibilityBuilder {
         }
     }
 
-    private static func projectedTurnStatus(from phase: SessionPhase) -> CanonicalTurnStatus {
+    static func projectedTurnStatus(from phase: ProjectedSessionRuntimePhase) -> CanonicalTurnStatus {
         switch phase {
         case .processing, .compacting, .waitingForApproval, .waitingForInput:
             return .inProgress
@@ -988,7 +1320,7 @@ private enum ProjectionCompatibilityBuilder {
         }
     }
 
-    private static func projectedToolState(for status: ToolStatus) -> ProjectedToolLifecycleState {
+    static func projectedToolState(for status: ToolStatus) -> ProjectedToolLifecycleState {
         switch status {
         case .running:
             return .running
@@ -1003,7 +1335,7 @@ private enum ProjectionCompatibilityBuilder {
         }
     }
 
-    private static func projectedToolOutput(from tool: ToolCallItem) -> [String: AnyCodable] {
+    static func projectedToolOutput(from tool: ToolCallItem) -> [String: AnyCodable] {
         var output: [String: AnyCodable] = [:]
         if let result = tool.result {
             output["text"] = AnyCodable(result)
@@ -1011,7 +1343,7 @@ private enum ProjectionCompatibilityBuilder {
         return output
     }
 
-    private static func canonicalToolKind(for name: String) -> CanonicalToolKind {
+    static func canonicalToolKind(for name: String) -> CanonicalToolKind {
         switch name.lowercased() {
         case "bash", "bashoutput", "killshell":
             return .bash
@@ -1024,90 +1356,93 @@ private enum ProjectionCompatibilityBuilder {
         }
     }
 
-    private static func parseTimestamp(_ value: String?) -> Date? {
+    static func toolStatus(from state: ProjectedToolLifecycleState) -> ToolStatus {
+        switch state {
+        case .started, .running:
+            return .running
+        case .completed:
+            return .success
+        case .failed, .declined:
+            return .error
+        case .cancelled, .timedOut:
+            return .interrupted
+        }
+    }
+
+    static func toolInputPreview(from tool: ProjectedToolState) -> String? {
+        formatToolInputPreview(from: tool.input)
+    }
+
+    static func toolInputPreview(from tool: ToolCallItem) -> String? {
+        tool.inputPreview.isEmpty ? nil : tool.inputPreview
+    }
+
+    static func formatToolInputPreview(from toolInput: [String: AnyCodable]) -> String? {
+        let parts = toolInput.map { key, value -> String in
+            let valueString: String
+            switch value.value {
+            case let string as String:
+                valueString = string.count > 120 ? String(string.prefix(120)) + "..." : string
+            case let number as Int:
+                valueString = String(number)
+            case let number as Double:
+                valueString = String(number)
+            case let bool as Bool:
+                valueString = bool ? "true" : "false"
+            case let dict as [String: Any]:
+                valueString = formatJSONObject(dict)
+            case let array as [Any]:
+                valueString = formatJSONArray(array)
+            default:
+                valueString = "..."
+            }
+            return "\(key): \(valueString)"
+        }
+        let joined = parts.sorted().joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
+    }
+
+    static func formatToolInputPreview(from toolInput: [String: AnyCodable]?) -> String? {
+        guard let toolInput else { return nil }
+        return formatToolInputPreview(from: toolInput)
+    }
+
+    static func encodeToolInputJSON(_ payload: [String: AnyCodable]) -> String? {
+        guard let data = try? JSONEncoder().encode(payload) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func parseTimestamp(_ value: String?) -> Date? {
         guard let value else { return nil }
         return CanonicalTimestampCoding.date(from: value)
     }
 
-    private static func fallbackChatItems(from conversation: ProjectedConversationState) -> [ChatHistoryItem] {
-        let messageItems = conversation.messages.map { message -> ChatHistoryItem in
-            let type: ChatHistoryItemType
-            switch message.role {
-            case .user:
-                type = .user(message.text)
-            case .assistant, .system, .tool:
-                type = .assistant(message.text)
-            }
-            return ChatHistoryItem(id: message.id, type: type, timestamp: message.updatedAt)
+    static func formatJSONObject(_ object: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed]),
+              var string = String(data: data, encoding: .utf8) else {
+            return "..."
         }
-
-        let toolItems = conversation.tools.map { tool -> ChatHistoryItem in
-            let status: ToolStatus
-            switch tool.state {
-            case .started, .running:
-                status = .running
-            case .completed:
-                status = .success
-            case .failed, .declined:
-                status = .error
-            case .cancelled, .timedOut:
-                status = .interrupted
-            }
-            let result = tool.output["text"]?.value as? String
-            return ChatHistoryItem(
-                id: tool.id,
-                type: .toolCall(
-                    ToolCallItem(
-                        name: tool.name,
-                        input: tool.input.compactMapValues { any in
-                            switch any.value {
-                            case let value as String:
-                                return value
-                            case let value as Int:
-                                return String(value)
-                            case let value as Double:
-                                return String(value)
-                            case let value as Bool:
-                                return value ? "true" : "false"
-                            default:
-                                return nil
-                            }
-                        },
-                        status: status,
-                        result: result,
-                        structuredResult: nil,
-                        subagentTools: []
-                    )
-                ),
-                timestamp: tool.updatedAt
-            )
+        if string.count > 160 {
+            string = String(string.prefix(160)) + "..."
         }
-
-        return (messageItems + toolItems).sorted { $0.timestamp < $1.timestamp }
+        return string
     }
 
-    private static func fallbackConversationInfo(
-        from conversation: ProjectedConversationState,
-        cwd: String
-    ) -> ConversationInfo {
-        let sortedMessages = conversation.messages.sorted { $0.updatedAt < $1.updatedAt }
-        let lastMessage = sortedMessages.last?.text ?? conversation.tools.sorted { $0.updatedAt < $1.updatedAt }.last?.name
-        let lastMessageRole = sortedMessages.last?.role.rawValue
-        let lastToolName = conversation.tools.sorted { $0.updatedAt < $1.updatedAt }.last?.name
-        let firstUserMessage = sortedMessages.first(where: { $0.role == .user })?.text ?? URL(fileURLWithPath: cwd).lastPathComponent
-        let lastUserMessage = sortedMessages.last(where: { $0.role == .user })?.text
-        let lastUserMessageDate = sortedMessages.last(where: { $0.role == .user })?.updatedAt
-
-        return ConversationInfo(
-            summary: conversation.title,
-            lastMessage: lastMessage,
-            lastMessageRole: lastMessageRole,
-            lastToolName: lastToolName,
-            firstUserMessage: firstUserMessage,
-            lastUserMessage: lastUserMessage,
-            lastUserMessageDate: lastUserMessageDate
-        )
+    static func formatJSONArray(_ array: [Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(array),
+              let data = try? JSONSerialization.data(withJSONObject: array, options: [.fragmentsAllowed]),
+              var string = String(data: data, encoding: .utf8) else {
+            return "..."
+        }
+        if string.count > 160 {
+            string = String(string.prefix(160)) + "..."
+        }
+        return string
     }
+
 }
 
 private extension Array where Element: Sendable {
@@ -1127,90 +1462,6 @@ private extension Array where Element: Sendable {
             }
 
             return values.compactMap { $0 }
-        }
-    }
-}
-
-private extension ProjectionBootstrap {
-    func buildActiveInteraction(
-        from event: HookEvent,
-        sessionID: String,
-        isInTmux: Bool,
-        tty: String?
-    ) -> SessionInteractionRequest? {
-        let submitMode = SessionInteractionRequest.submitMode(isInTmux: isInTmux, tty: tty)
-        switch event.agentId {
-        case "codex":
-            guard event.event == HookEventType.preToolUse.rawValue,
-                  event.tool == "request_user_input",
-                  let toolUseID = event.toolUseId else {
-                return nil
-            }
-            return SessionInteractionRequest.fromToolInputPayload(
-                sessionId: sessionID,
-                toolUseId: toolUseID,
-                payload: event.toolInput ?? [:],
-                timestamp: Date(),
-                sourceAgent: event.agentId,
-                submitMode: .programmatic,
-                transportPreference: .programmaticOnly
-            )
-        case "claude":
-            guard event.event == HookEventType.preToolUse.rawValue,
-                  event.tool == "AskUserQuestion",
-                  let toolUseID = event.toolUseId else {
-                return nil
-            }
-            return SessionInteractionRequest.fromClaudeAskUserQuestion(
-                sessionId: sessionID,
-                toolUseId: toolUseID,
-                payload: event.toolInput ?? [:],
-                timestamp: Date(),
-                sourceAgent: event.agentId,
-                submitMode: .programmatic
-            )
-        case "gemini":
-            guard event.event == HookEventType.preToolUse.rawValue,
-                  event.tool == "ask_user",
-                  let toolUseID = event.toolUseId else {
-                return nil
-            }
-            let payload = (event.toolInput ?? [:]).reduce(into: [String: Any]()) { partialResult, item in
-                partialResult[item.key] = item.value.value
-            }
-            return SessionInteractionRequest.fromJSONObjectPayload(
-                sessionId: sessionID,
-                toolUseId: toolUseID,
-                payload: payload,
-                timestamp: Date(),
-                sourceAgent: event.agentId,
-                submitMode: .programmatic,
-                transportPreference: .programmaticOnly
-            )
-        default:
-            if event.event == HookEventType.interactionRequest.rawValue {
-                if let toolInput = event.toolInput {
-                    return SessionInteractionRequest.fromToolInputPayload(
-                        sessionId: sessionID,
-                        toolUseId: event.toolUseId ?? "\(sessionID)-interaction",
-                        payload: toolInput,
-                        timestamp: Date(),
-                        sourceAgent: event.agentId,
-                        submitMode: submitMode
-                    )
-                }
-                if let message = event.message {
-                    return SessionInteractionRequest.fromHeuristicText(
-                        sessionId: sessionID,
-                        interactionId: event.toolUseId ?? "\(sessionID)-interaction",
-                        sourceAgent: event.agentId,
-                        text: message,
-                        timestamp: Date(),
-                        submitMode: submitMode
-                    )
-                }
-            }
-            return nil
         }
     }
 }

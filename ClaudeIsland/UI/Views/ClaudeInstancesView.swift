@@ -44,10 +44,10 @@ struct AgentInstancesView: View {
     /// Priority: active (approval/processing/compacting) > waitingForInput > idle
     /// Secondary sort: by last user message date (stable - doesn't change when agent responds)
     /// Note: approval requests stay in their date-based position to avoid layout shift
-    private var sortedInstances: [SessionState] {
+    private var sortedInstances: [ProjectedSessionViewState] {
         sessionMonitor.instances.sorted { a, b in
-            let hasInteractionA = a.activeInteraction != nil
-            let hasInteractionB = b.activeInteraction != nil
+            let hasInteractionA = a.prompt != nil
+            let hasInteractionB = b.prompt != nil
             if hasInteractionA != hasInteractionB {
                 return hasInteractionA && !hasInteractionB
             }
@@ -67,7 +67,7 @@ struct AgentInstancesView: View {
 
     /// Lower number = higher priority
     /// Approval requests share priority with processing to maintain stable ordering
-    private func phasePriority(_ phase: SessionPhase) -> Int {
+    private func phasePriority(_ phase: ProjectedSessionRuntimePhase) -> Int {
         switch phase {
         case .waitingForApproval, .processing, .compacting: return 0
         case .waitingForInput: return 1
@@ -82,26 +82,26 @@ struct AgentInstancesView: View {
                     ForEach(sortedInstances) { session in
                         AgentInstanceRow(
                             session: session,
-                            isExpanded: expandedSessionIds.contains(session.sessionId),
-                            isInteractionSubmitting: sessionMonitor.submittingInteractionSessionIds.contains(session.sessionId),
-                            interactionSubmitError: sessionMonitor.interactionSubmitErrors[session.sessionId],
+                            isExpanded: expandedSessionIds.contains(session.sessionID),
+                            isInteractionSubmitting: sessionMonitor.submittingInteractionSessionIds.contains(session.sessionID),
+                            interactionSubmitError: sessionMonitor.interactionSubmitErrors[session.sessionID],
                             onShare: { shareSession(session) },
                             onChat: { openChat(session) },
                             onArchive: { archiveSession(session) },
                             onApprove: { approveSession(session) },
                             onReject: { rejectSession(session) },
                             onBypass: { bypassSession(session) },
-                            onToggleExpanded: { toggleExpanded(sessionId: session.sessionId) },
+                            onToggleExpanded: { toggleExpanded(sessionId: session.sessionID) },
                             onOpenHostApp: {
                                 Task {
-                                    _ = await sessionMonitor.focusSession(sessionId: session.sessionId)
+                                    _ = await sessionMonitor.focusSession(sessionId: session.sessionID)
                                 }
                             },
                             onSubmitInteractionResponses: { responses in
                                 handleInteractionResponseSelection(session: session, responses: responses)
                             }
                         )
-                        .id(session.sessionId)
+                        .id(session.sessionID)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -129,7 +129,7 @@ struct AgentInstancesView: View {
 
     // MARK: - Actions
 
-    private func shareSession(_ session: SessionState) {
+    private func shareSession(_ session: ProjectedSessionViewState) {
         Task {
             let didFocus = await focusSessionWindow(session)
             if !didFocus {
@@ -140,7 +140,7 @@ struct AgentInstancesView: View {
         }
     }
 
-    private func focusSessionWindow(_ session: SessionState) async -> Bool {
+    private func focusSessionWindow(_ session: ProjectedSessionViewState) async -> Bool {
         if session.isInTmux {
             if let pid = session.pid,
                await YabaiController.shared.focusWindow(forClaudePid: pid) {
@@ -155,7 +155,7 @@ struct AgentInstancesView: View {
         return activateHostApp(for: session)
     }
 
-    private func activateHostApp(for session: SessionState) -> Bool {
+    private func activateHostApp(for session: ProjectedSessionViewState) -> Bool {
         guard let pid = session.pid else { return false }
 
         let tree = ProcessTreeBuilder.shared.buildTree()
@@ -164,27 +164,27 @@ struct AgentInstancesView: View {
             return false
         }
 
-        return app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        return app.activate(options: [.activateAllWindows])
     }
 
-    private func openChat(_ session: SessionState) {
-        viewModel.showChat(for: session)
+    private func openChat(_ session: ProjectedSessionViewState) {
+        viewModel.showChat(for: session.sessionID)
     }
 
-    private func approveSession(_ session: SessionState) {
-        sessionMonitor.approvePermission(sessionId: session.sessionId)
+    private func approveSession(_ session: ProjectedSessionViewState) {
+        sessionMonitor.approvePermission(sessionId: session.sessionID)
     }
 
-    private func rejectSession(_ session: SessionState) {
-        sessionMonitor.denyPermission(sessionId: session.sessionId, reason: nil)
+    private func rejectSession(_ session: ProjectedSessionViewState) {
+        sessionMonitor.denyPermission(sessionId: session.sessionID, reason: nil)
     }
 
-    private func bypassSession(_ session: SessionState) {
-        sessionMonitor.bypassPermission(sessionId: session.sessionId)
+    private func bypassSession(_ session: ProjectedSessionViewState) {
+        sessionMonitor.bypassPermission(sessionId: session.sessionID)
     }
 
-    private func archiveSession(_ session: SessionState) {
-        sessionMonitor.archiveSession(sessionId: session.sessionId)
+    private func archiveSession(_ session: ProjectedSessionViewState) {
+        sessionMonitor.archiveSession(sessionId: session.sessionID)
     }
 
     private func toggleExpanded(sessionId: String) {
@@ -196,7 +196,7 @@ struct AgentInstancesView: View {
     }
 
     private func pruneExpandedSessions() {
-        let validIds = Set(sessionMonitor.instances.map(\.sessionId))
+        let validIds = Set(sessionMonitor.instances.map(\.sessionID))
         expandedSessionIds = expandedSessionIds.intersection(validIds)
     }
 
@@ -206,7 +206,7 @@ struct AgentInstancesView: View {
             return
         }
 
-        let validIds = Set(sessionMonitor.instances.map(\.sessionId))
+        let validIds = Set(sessionMonitor.instances.map(\.sessionID))
         guard validIds.contains(sessionId) else {
             viewModel.consumePendingExpandedSession()
             viewModel.consumePendingScrollTarget()
@@ -222,7 +222,7 @@ struct AgentInstancesView: View {
     }
     
     private func performDeferredScroll(to sessionId: String, with proxy: ScrollViewProxy) {
-        let validIds = Set(sessionMonitor.instances.map(\.sessionId))
+        let validIds = Set(sessionMonitor.instances.map(\.sessionID))
         guard validIds.contains(sessionId) else {
             scheduledScrollSessionId = nil
             return
@@ -236,22 +236,22 @@ struct AgentInstancesView: View {
         }
     }
 
-    private func handleInteractionOptionSelection(session: SessionState, option: InteractionOption) {
-        let questionId = session.activeInteraction?.questions.first?.id ?? "question-0"
+    private func handleInteractionOptionSelection(session: ProjectedSessionViewState, option: ProjectedInteractionOptionState) {
+        let questionId = session.prompt?.questions.first?.id ?? "question-0"
         handleInteractionResponseSelection(
             session: session,
-            responses: [InteractionResponse(questionId: questionId, option: option)]
+            responses: [ProjectedPromptSelection(questionID: questionId, option: option)]
         )
     }
 
-    private func handleInteractionResponseSelection(session: SessionState, responses: [InteractionResponse]) {
+    private func handleInteractionResponseSelection(session: ProjectedSessionViewState, responses: [ProjectedPromptSelection]) {
         Task {
-            let result = await sessionMonitor.submitInteraction(sessionId: session.sessionId, responses: responses)
+            let result = await sessionMonitor.submitInteraction(sessionId: session.sessionID, selections: responses)
             if result.confirmed {
                 await MainActor.run {
-                    expandedSessionIds.remove(session.sessionId)
-                    if let interaction = session.activeInteraction {
-                        viewModel.clearInteraction(for: session.sessionId, interactionId: interaction.id)
+                    expandedSessionIds.remove(session.sessionID)
+                    if let prompt = session.prompt {
+                        viewModel.clearInteraction(for: session.sessionID, interactionId: prompt.id)
                     }
                 }
             }
@@ -262,7 +262,7 @@ struct AgentInstancesView: View {
 // MARK: - Instance Row
 
 struct AgentInstanceRow: View {
-    let session: SessionState
+    let session: ProjectedSessionViewState
     let isExpanded: Bool
     let isInteractionSubmitting: Bool
     let interactionSubmitError: String?
@@ -274,14 +274,14 @@ struct AgentInstanceRow: View {
     let onBypass: () -> Void
     let onToggleExpanded: () -> Void
     let onOpenHostApp: () -> Void
-    let onSubmitInteractionResponses: ([InteractionResponse]) -> Void
+    let onSubmitInteractionResponses: ([ProjectedPromptSelection]) -> Void
 
     @State private var isHovered = false
     @State private var isYabaiAvailable = false
 
     /// Agent-specific accent color
     private var agentAccentColor: Color {
-        TerminalColors.agentAccent(for: session.agentId)
+        TerminalColors.agentAccent(for: session.agentID)
     }
 
     /// Whether we're showing the approval UI
@@ -289,33 +289,16 @@ struct AgentInstanceRow: View {
         session.phase.isWaitingForApproval
     }
 
-    private var activeInteraction: SessionInteractionRequest? {
-        if let interaction = session.activeInteraction {
-            return interaction
-        }
-
-        guard let permission = session.activePermission else {
-            return nil
-        }
-
-        return SessionInteractionRequest.from(
-            permission: permission,
-            sessionId: session.sessionId,
-            agentId: session.agentId,
-            submitMode: SessionInteractionRequest.submitMode(isInTmux: session.isInTmux, tty: session.tty)
-        )
+    private var activeInteraction: ProjectedPromptState? {
+        session.prompt
     }
 
     private var canSubmitInteractionDirectly: Bool {
-        guard let interaction = activeInteraction else { return false }
-        if interaction.sourceAgent == "codex" || interaction.sourceAgent == "gemini" || interaction.sourceAgent == "claude" {
-            return interaction.canSubmitDirectly
-        }
-        return interaction.submitMode == .ttyInjection || interaction.submitMode == .programmatic
+        activeInteraction?.canSubmitDirectly ?? false
     }
 
     private var agentDisplayName: String {
-        AgentRegistry.shared.shortDisplayName(for: session.agentId)
+        AgentRegistry.shared.shortDisplayName(for: session.adapterID)
     }
 
     private var hostAppName: String {
@@ -336,8 +319,8 @@ struct AgentInstanceRow: View {
     }
 
     private var lastAssistantOutput: String? {
-        for item in session.chatItems.reversed() {
-            switch item.type {
+        for item in session.timeline.reversed() {
+            switch item.content {
             case .assistant(let text), .thinking(let text):
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
@@ -353,8 +336,8 @@ struct AgentInstanceRow: View {
     }
 
     private var lastVisibleToolCall: ToolCallItem? {
-        for item in session.chatItems.reversed() {
-            if case .toolCall(let tool) = item.type,
+        for item in session.timeline.reversed() {
+            if case .tool(let tool) = item.content,
                tool.name != "Task" {
                 return tool
             }
@@ -363,8 +346,8 @@ struct AgentInstanceRow: View {
     }
 
     private var lastBashCommand: String? {
-        for item in session.chatItems.reversed() {
-            guard case .toolCall(let tool) = item.type else { continue }
+        for item in session.timeline.reversed() {
+            guard case .tool(let tool) = item.content else { continue }
             if tool.name == "Bash", let command = tool.input["command"], !command.isEmpty {
                 return command
             }
@@ -408,12 +391,12 @@ struct AgentInstanceRow: View {
     }
 
     private var latestActionDisplay: ActionTextDisplay {
-        if let permission = session.activePermission {
-            if permission.toolName == "AskUserQuestion" || permission.toolName == "request_user_input" {
+        if let prompt = activeInteraction, prompt.kind == .approval {
+            if prompt.toolName == "AskUserQuestion" || prompt.toolName == "request_user_input" {
                 return .highlighted(label: "request user input", detail: requestUserInputContext, color: TerminalColors.amber)
             }
 
-            if permission.toolName == "Bash",
+            if prompt.toolName == "Bash",
                let command = session.pendingToolInput,
                !command.isEmpty {
                 return .highlighted(label: "Bash", detail: command, color: agentAccentColor)
@@ -421,14 +404,14 @@ struct AgentInstanceRow: View {
 
             if let input = session.pendingToolInput, !input.isEmpty {
                 return .highlighted(
-                    label: MCPToolFormatter.formatToolName(permission.toolName),
+                    label: MCPToolFormatter.formatToolName(prompt.toolName ?? "unknown"),
                     detail: input,
                     color: TerminalColors.amber
                 )
             }
 
             return .highlighted(
-                label: MCPToolFormatter.formatToolName(permission.toolName),
+                label: MCPToolFormatter.formatToolName(prompt.toolName ?? "unknown"),
                 detail: "waiting for approval",
                 color: TerminalColors.amber
             )
@@ -499,7 +482,7 @@ struct AgentInstanceRow: View {
                                 .lineLimit(1)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityIdentifier("session.title.\(session.sessionId)")
+                        .accessibilityIdentifier("session.title.\(session.sessionID)")
 
                         Spacer(minLength: 12)
 
@@ -533,7 +516,7 @@ struct AgentInstanceRow: View {
 
                     ActionLine(
                         display: latestActionDisplay,
-                        accessibilityID: "session.action.\(session.sessionId)"
+                        accessibilityID: "session.action.\(session.sessionID)"
                     )
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -558,7 +541,7 @@ struct AgentInstanceRow: View {
         .padding(.trailing, 14)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .accessibilityIdentifier("session.row.\(session.sessionId)")
+        .accessibilityIdentifier("session.row.\(session.sessionID)")
         .onTapGesture {
             onChat()
         }
@@ -584,14 +567,14 @@ struct AgentInstanceRow: View {
             ClaudeCrabIcon(
                 size: 34,
                 color: agentAccentColor,
-                animateLegs: session.phase == .processing || session.phase == .compacting
+                animateLegs: session.phase.isProcessingLike
             )
         }
     }
 
     @ViewBuilder
     private var actionControls: some View {
-        if let interaction = activeInteraction, interaction.kind == .singleChoice {
+        if activeInteraction != nil {
             HStack(spacing: 8) {
                 TextActionPill(
                     label: isExpanded ? "Hide" : "Options\(session.pendingInteractionCount > 1 ? " (\(session.pendingInteractionCount))" : "")",
@@ -615,18 +598,18 @@ struct AgentInstanceRow: View {
 }
 
 private struct SessionInteractionCard: View {
-    let interaction: SessionInteractionRequest
+    let interaction: ProjectedPromptState
     let accentColor: Color
     let canSubmitDirectly: Bool
     let isSubmitting: Bool
     let submitError: String?
-    let onSubmitResponses: ([InteractionResponse]) -> Void
+    let onSubmitResponses: ([ProjectedPromptSelection]) -> Void
     let onOpenHostApp: () -> Void
 
-    @State private var selections: [String: InteractionOption] = [:]
+    @State private var selections: [String: ProjectedInteractionOptionState] = [:]
     @State private var currentQuestionIndex = 0
 
-    private var currentQuestion: InteractionQuestion? {
+    private var currentQuestion: ProjectedInteractionQuestionState? {
         guard !interaction.questions.isEmpty else { return nil }
         return interaction.questions[min(currentQuestionIndex, interaction.questions.count - 1)]
     }
@@ -796,18 +779,18 @@ private struct SessionInteractionCard: View {
         }
     }
 
-    private func interactionQuestionAccessibilityIdentifier(_ question: InteractionQuestion) -> String {
+    private func interactionQuestionAccessibilityIdentifier(_ question: ProjectedInteractionQuestionState) -> String {
         "session.interaction.question.\(interaction.id).\(question.id)"
     }
 
     private func interactionOptionAccessibilityIdentifier(
-        _ question: InteractionQuestion,
-        _ option: InteractionOption
+        _ question: ProjectedInteractionQuestionState,
+        _ option: ProjectedInteractionOptionState
     ) -> String {
         "session.interaction.option.\(interaction.id).\(question.id).\(option.id)"
     }
 
-    private func backgroundColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
+    private func backgroundColor(for role: ProjectedInteractionOptionRole, isSelected: Bool = false) -> Color {
         if isSelected {
             return accentColor.opacity(0.82)
         }
@@ -823,7 +806,7 @@ private struct SessionInteractionCard: View {
         }
     }
 
-    private func foregroundColor(for role: InteractionOptionRole) -> Color {
+    private func foregroundColor(for role: ProjectedInteractionOptionRole) -> Color {
         switch role {
         case .primary:
             return .black.opacity(0.9)
@@ -836,7 +819,7 @@ private struct SessionInteractionCard: View {
         }
     }
 
-    private func borderColor(for role: InteractionOptionRole, isSelected: Bool = false) -> Color {
+    private func borderColor(for role: ProjectedInteractionOptionRole, isSelected: Bool = false) -> Color {
         if isSelected {
             return Color.white.opacity(0.24)
         }
@@ -852,18 +835,18 @@ private struct SessionInteractionCard: View {
         }
     }
 
-    private func handleSelection(_ option: InteractionOption, for question: InteractionQuestion) {
+    private func handleSelection(_ option: ProjectedInteractionOptionState, for question: ProjectedInteractionQuestionState) {
         if interaction.isMultiQuestion {
             selections[question.id] = option
         } else {
-            onSubmitResponses([InteractionResponse(questionId: question.id, option: option)])
+            onSubmitResponses([ProjectedPromptSelection(questionID: question.id, option: option)])
         }
     }
 
     private func submitAllResponses() {
         onSubmitResponses(interaction.questions.compactMap { question in
             guard let option = selections[question.id] else { return nil }
-            return InteractionResponse(questionId: question.id, option: option)
+            return ProjectedPromptSelection(questionID: question.id, option: option)
         })
     }
 

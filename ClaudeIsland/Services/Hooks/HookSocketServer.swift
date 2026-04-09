@@ -221,7 +221,7 @@ typealias PermissionFailureHandler = @Sendable (_ sessionId: String, _ toolUseId
 
 /// Unix domain socket server that receives events from Claude Code hooks
 /// Uses GCD DispatchSource for non-blocking I/O
-class HookSocketServer {
+final class HookSocketServer: @unchecked Sendable {
     static let shared = HookSocketServer()
     static let socketPath = "/tmp/claude-island.sock"
 
@@ -318,31 +318,33 @@ class HookSocketServer {
         acceptSource?.resume()
     }
 
-    /// Stop the socket server
-    func stop() {
-        acceptSource?.cancel()
-        acceptSource = nil
-        unlink(Self.socketPath)
-
-        permissionsLock.lock()
-        for (_, pending) in pendingPermissions {
-            close(pending.clientSocket)
+    /// Stop the socket server.
+    /// All shutdown state transitions stay on the owned socket queue to avoid sync traps.
+    func stop() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                self?.stopServer()
+                continuation.resume()
+            }
         }
-        pendingPermissions.removeAll()
-        permissionsLock.unlock()
-
-        interactionsLock.lock()
-        for (_, pending) in pendingInteractions {
-            close(pending.clientSocket)
-        }
-        pendingInteractions.removeAll()
-        interactionsLock.unlock()
     }
 
     /// Respond to a pending permission request by toolUseId
-    func respondToPermission(toolUseId: String, decision: String, reason: String? = nil) {
-        queue.async { [weak self] in
-            self?.sendPermissionResponse(toolUseId: toolUseId, decision: decision, reason: reason)
+    func respondToPermission(toolUseId: String, decision: String, reason: String? = nil) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                continuation.resume(
+                    returning: self.sendPermissionResponse(
+                        toolUseId: toolUseId,
+                        decision: decision,
+                        reason: reason
+                    )
+                )
+            }
         }
     }
 
@@ -433,6 +435,32 @@ class HookSocketServer {
             pendingInteractions.removeValue(forKey: toolUseId)
         }
         interactionsLock.unlock()
+    }
+
+    private func stopServer() {
+        acceptSource?.cancel()
+        acceptSource = nil
+        eventHandler = nil
+        permissionFailureHandler = nil
+        unlink(Self.socketPath)
+
+        permissionsLock.lock()
+        for (_, pending) in pendingPermissions {
+            close(pending.clientSocket)
+        }
+        pendingPermissions.removeAll()
+        permissionsLock.unlock()
+
+        interactionsLock.lock()
+        for (_, pending) in pendingInteractions {
+            close(pending.clientSocket)
+        }
+        pendingInteractions.removeAll()
+        interactionsLock.unlock()
+
+        cacheLock.lock()
+        toolUseIdCache.removeAll()
+        cacheLock.unlock()
     }
 
     // MARK: - Tool Use ID Cache
@@ -696,7 +724,7 @@ class HookSocketServer {
         eventHandler?(eventToDispatch)
     }
 
-    private func sendPermissionResponse(toolUseId: String, decision: String, reason: String?) {
+    private func sendPermissionResponse(toolUseId: String, decision: String, reason: String?) -> Bool {
         sendHookResponse(
             toolUseId: toolUseId,
             response: HookResponse(decision: decision, reason: reason, updatedInput: nil),
@@ -704,37 +732,39 @@ class HookSocketServer {
         )
     }
 
-    private func sendHookResponse(toolUseId: String, response: HookResponse, summary: String) {
+    private func sendHookResponse(toolUseId: String, response: HookResponse, summary: String) -> Bool {
         permissionsLock.lock()
         guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
             permissionsLock.unlock()
             logger.debug("No pending permission for toolUseId: \(toolUseId.prefix(12), privacy: .public)")
-            return
+            return false
         }
         permissionsLock.unlock()
 
         guard let data = try? JSONEncoder().encode(response) else {
             close(pending.clientSocket)
-            return
+            return false
         }
 
         let age = Date().timeIntervalSince(pending.receivedAt)
         logger.info("Sending response: \(summary, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
 
-        data.withUnsafeBytes { bytes in
+        let writeSucceeded = data.withUnsafeBytes { bytes -> Bool in
             guard let baseAddress = bytes.baseAddress else {
                 logger.error("Failed to get data buffer address")
-                return
+                return false
             }
             let result = write(pending.clientSocket, baseAddress, data.count)
             if result < 0 {
                 logger.error("Write failed with errno: \(errno)")
-            } else {
-                logger.debug("Write succeeded: \(result) bytes")
+                return false
             }
+            logger.debug("Write succeeded: \(result) bytes")
+            return true
         }
 
         close(pending.clientSocket)
+        return writeSucceeded
     }
 
     private func sendInteractionResponse(toolUseId: String, updatedInput: [String: Any]) -> InteractionResponseWriteResult {

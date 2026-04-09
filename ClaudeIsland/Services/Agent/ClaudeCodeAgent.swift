@@ -9,7 +9,7 @@
 import Foundation
 
 /// Claude Code agent implementation
-struct ClaudeCodeAgent: AIAgent {
+struct ClaudeCodeAgent: HookInstallableAgent {
     let id: String = "claude"
     let name: String = "Claude Code"
     let priority: Int = 0  // Highest priority

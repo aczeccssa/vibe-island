@@ -50,10 +50,12 @@ class ChatHistoryManager: ObservableObject {
         loadingSessions.insert(sessionId)
         defer {
             loadingSessions.remove(sessionId)
-            loadedSessions.insert(sessionId)
         }
 
         await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
+        if await SessionStore.shared.session(for: sessionId) != nil {
+            loadedSessions.insert(sessionId)
+        }
     }
 
     func syncFromFile(sessionId: String, cwd: String) async {
@@ -154,6 +156,8 @@ struct ToolCallItem: Equatable, Sendable {
 
     /// For Task tools: nested subagent tool calls
     var subagentTools: [SubagentToolCall]
+    var headerDetailText: String? = nil
+    var pendingDetailsText: String? = nil
 
     /// Preview text for the tool (input-based)
     var inputPreview: String {
@@ -202,7 +206,9 @@ struct ToolCallItem: Equatable, Sendable {
         lhs.result == rhs.result &&
         lhs.structuredResult == rhs.structuredResult &&
         lhs.resolvedFromToolUseId == rhs.resolvedFromToolUseId &&
-        lhs.subagentTools == rhs.subagentTools
+        lhs.subagentTools == rhs.subagentTools &&
+        lhs.headerDetailText == rhs.headerDetailText &&
+        lhs.pendingDetailsText == rhs.pendingDetailsText
     }
 }
 

@@ -390,6 +390,12 @@ actor SessionProjectionStore {
         publishSnapshot()
     }
 
+    func updateConversationStatus(id: String, status: CanonicalConversationStatus) {
+        guard var conversation = conversations[id] else { return }
+        conversation.status = status
+        persist(conversation)
+    }
+
     private func materializeConversation(from event: CanonicalEventEnvelope) -> ProjectedConversationState {
         if var existing = conversations[event.conversation.id] {
             existing.adapterID = event.adapterID

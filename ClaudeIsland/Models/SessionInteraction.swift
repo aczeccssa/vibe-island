@@ -2,7 +2,8 @@
 //  SessionInteraction.swift
 //  ClaudeIsland
 //
-//  Shared interaction models derived from agent requests.
+//  LEGACY FROZEN (Phase 0): preserve these legacy interaction models only for
+//  frozen compatibility surfaces. New shared prompt semantics must not grow here.
 //
 
 import Foundation

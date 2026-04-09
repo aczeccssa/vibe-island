@@ -24,10 +24,13 @@ private struct CanonicalEventDedupeKey: Hashable, Sendable {
 
 actor CanonicalEventBus {
     typealias SubscriberStream = AsyncStream<CanonicalEventEnvelope>
+    private static let maxFingerprintsPerDedupeKey = 64
+    private static let maxDedupeKeys = 2048
 
     private var historyStorage: [CanonicalEventEnvelope] = []
     private var subscribers: [UUID: SubscriberStream.Continuation] = [:]
-    private var seenFingerprints: [CanonicalEventDedupeKey: Set<Data>] = [:]
+    private var seenFingerprints: [CanonicalEventDedupeKey: [Data]] = [:]
+    private var dedupeKeyOrder: [CanonicalEventDedupeKey] = []
 
     func publish(_ event: CanonicalEventEnvelope) throws -> CanonicalEventPublishOutcome {
         let dedupeKey = CanonicalEventDedupeKey(
@@ -44,7 +47,16 @@ actor CanonicalEventBus {
             return .duplicateIgnored
         }
 
-        seenFingerprints[dedupeKey, default: []].insert(fingerprint)
+        var bucket = seenFingerprints[dedupeKey, default: []]
+        if bucket.isEmpty {
+            dedupeKeyOrder.append(dedupeKey)
+            trimDedupeKeyStorageIfNeeded()
+        }
+        bucket.append(fingerprint)
+        if bucket.count > Self.maxFingerprintsPerDedupeKey {
+            bucket.removeFirst(bucket.count - Self.maxFingerprintsPerDedupeKey)
+        }
+        seenFingerprints[dedupeKey] = bucket
         historyStorage.append(event)
         fanOut(event)
         return .published
@@ -67,6 +79,22 @@ actor CanonicalEventBus {
         historyStorage
     }
 
+    func fingerprintCount(for event: CanonicalEventEnvelope) -> Int {
+        let dedupeKey = CanonicalEventDedupeKey(
+            type: event.type,
+            conversationID: event.conversation.id,
+            primaryEntityID: event.primaryEntityID,
+            adapterID: event.adapterID,
+            sourceKind: event.agent.sourceKind,
+            sourceSequence: sourceSequenceToken(from: event.sourceSeq)
+        )
+        return seenFingerprints[dedupeKey, default: []].count
+    }
+
+    func dedupeKeyCount() -> Int {
+        seenFingerprints.count
+    }
+
     private func fanOut(_ event: CanonicalEventEnvelope) {
         for continuation in subscribers.values {
             continuation.yield(event)
@@ -75,6 +103,17 @@ actor CanonicalEventBus {
 
     private func removeSubscriber(_ subscriberID: UUID) {
         subscribers.removeValue(forKey: subscriberID)
+    }
+
+    private func trimDedupeKeyStorageIfNeeded() {
+        guard dedupeKeyOrder.count > Self.maxDedupeKeys else { return }
+
+        let overflowCount = dedupeKeyOrder.count - Self.maxDedupeKeys
+        let evictedKeys = dedupeKeyOrder.prefix(overflowCount)
+        for key in evictedKeys {
+            seenFingerprints.removeValue(forKey: key)
+        }
+        dedupeKeyOrder.removeFirst(overflowCount)
     }
 
     private func sourceSequenceToken(from sourceSequence: CanonicalSourceSequence?) -> String? {

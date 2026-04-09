@@ -42,6 +42,8 @@ extension RuntimeIdentity {
             return RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .cli)
         case "codex":
             return RuntimeIdentity(adapterID: .codexCLI, familyID: .codex, modeHint: .unknown)
+        case "codex-app":
+            return RuntimeIdentity(adapterID: .codexApp, familyID: .codex, modeHint: .app)
         case "gemini":
             return RuntimeIdentity(adapterID: .geminiCLI, familyID: .gemini, modeHint: .cli)
         case "opencode":

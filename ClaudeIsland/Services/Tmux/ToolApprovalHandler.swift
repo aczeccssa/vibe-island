@@ -63,10 +63,21 @@ actor ToolApprovalHandler {
         return true
     }
 
+    /// Send Ctrl-C to interrupt the active runtime in a tmux pane
+    func interrupt(target: TmuxTarget) async -> Bool {
+        await sendSpecialKey(to: target, key: "C-c")
+    }
+
+    /// Send Ctrl-L to clear the visible terminal surface in a tmux pane
+    func clearSurface(target: TmuxTarget) async -> Bool {
+        await sendSpecialKey(to: target, key: "C-l")
+    }
+
     // MARK: - Private Methods
 
     private func sendKeys(to target: TmuxTarget, keys: String, pressEnter: Bool) async -> Bool {
         guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else {
+            Self.logger.error("tmux executable not found while sending keys to \(target.targetString, privacy: .public)")
             return false
         }
 
@@ -85,6 +96,25 @@ actor ToolApprovalHandler {
                 let enterArgs = ["send-keys", "-t", targetStr, "Enter"]
                 _ = try await ProcessExecutor.shared.run(tmuxPath, arguments: enterArgs)
             }
+            return true
+        } catch {
+            Self.logger.error("Error: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    private func sendSpecialKey(to target: TmuxTarget, key: String) async -> Bool {
+        guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else {
+            Self.logger.error("tmux executable not found while sending \(key, privacy: .public) to \(target.targetString, privacy: .public)")
+            return false
+        }
+
+        do {
+            Self.logger.debug("Sending special key \(key, privacy: .public) to \(target.targetString, privacy: .public)")
+            _ = try await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["send-keys", "-t", target.targetString, key]
+            )
             return true
         } catch {
             Self.logger.error("Error: \(error.localizedDescription, privacy: .public)")

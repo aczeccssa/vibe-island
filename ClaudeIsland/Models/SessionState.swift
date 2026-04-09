@@ -2,8 +2,8 @@
 //  SessionState.swift
 //  ClaudeIsland
 //
-//  Unified state model for a Claude session.
-//  Consolidates all state that was previously spread across multiple components.
+//  LEGACY FROZEN (Phase 0): keep this legacy session aggregate as a compatibility
+//  baseline only. New shared runtime or UI semantics must not be added here.
 //
 
 import Foundation
