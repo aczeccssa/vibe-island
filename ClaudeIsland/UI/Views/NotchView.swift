@@ -405,6 +405,18 @@ struct NotchView: View {
                             viewModel: viewModel
                         )
                         .accessibilityIdentifier("chat.view")
+                    } else {
+                        AgentInstancesView(
+                            sessionMonitor: sessionMonitor,
+                            viewModel: viewModel
+                        )
+                        .accessibilityIdentifier("instances.view")
+                        .task(id: sessionID) {
+                            if case .chat(let current) = viewModel.contentType,
+                               current == sessionID {
+                                viewModel.exitChat()
+                            }
+                        }
                     }
                 }
             }

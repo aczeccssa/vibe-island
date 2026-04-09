@@ -14,6 +14,8 @@ nonisolated private func adapterIDForLegacyAgentID(_ legacyAgentID: String) -> R
         return .claudeCode
     case "codex":
         return .codexCLI
+    case "codex-app":
+        return .codexApp
     case "gemini":
         return .geminiCLI
     case "opencode":

@@ -261,8 +261,12 @@ struct CodexAgent: HookInstallableAgent {
         bindings: [String] = []
     ) -> ResolvedCodexConversation? {
         var database: OpaquePointer?
-        guard sqlite3_open_v2(databasePath, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+        let openResult = sqlite3_open_v2(databasePath, &database, SQLITE_OPEN_READONLY, nil)
+        guard openResult == SQLITE_OK,
               let database else {
+            if let database {
+                sqlite3_close(database)
+            }
             return nil
         }
         defer { sqlite3_close(database) }

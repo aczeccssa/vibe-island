@@ -190,6 +190,30 @@ final class ArchitectureInvariantTests: XCTestCase {
         )
     }
 
+    func testProjectionBootstrapRefreshesUICacheBeforePublishingSnapshots() throws {
+        let repoRoot = repoRootURL()
+        let bootstrapFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Projection/ProjectionBootstrap.swift"
+        )
+        let content = try String(contentsOf: bootstrapFile, encoding: .utf8)
+
+        let rebuildCache = try XCTUnwrap(
+            content.range(of: "cachedUISessionsByID = buildUISessions(\n            snapshot: snapshot,")
+        )
+        let rebuildPublish = try XCTUnwrap(
+            content.range(of: "await projectionStore.replaceSnapshot(snapshot)")
+        )
+        XCTAssertLessThan(rebuildCache.lowerBound, rebuildPublish.lowerBound)
+
+        let fixtureCache = try XCTUnwrap(
+            content.range(of: "cachedUISessionsByID = buildUISessions(\n                snapshot: fixture.snapshot,")
+        )
+        let fixturePublish = try XCTUnwrap(
+            content.range(of: "await projectionStore.replaceSnapshot(fixture.snapshot)")
+        )
+        XCTAssertLessThan(fixtureCache.lowerBound, fixturePublish.lowerBound)
+    }
+
     func testAppDelegateTerminationStopsLiveIngressCoordinator() throws {
         let repoRoot = repoRootURL()
         let appDelegateFile = repoRoot.appendingPathComponent("ClaudeIsland/App/AppDelegate.swift")
@@ -336,6 +360,40 @@ final class ArchitectureInvariantTests: XCTestCase {
         XCTAssertTrue(
             content.contains("values[index] = value"),
             "ProjectionBootstrap asyncMap must preserve input ordering while collecting concurrent results."
+        )
+    }
+
+    func testNotchViewFallsBackToInstancesWhenSavedChatSessionIsMissing() throws {
+        let repoRoot = repoRootURL()
+        let notchFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/UI/Views/NotchView.swift"
+        )
+        let content = try String(contentsOf: notchFile, encoding: .utf8)
+
+        XCTAssertTrue(
+            content.contains("viewModel.exitChat()"),
+            "NotchView should clear stale chat state when the saved session target is missing."
+        )
+        XCTAssertTrue(
+            content.contains("AgentInstancesView("),
+            "NotchView should render the instances list instead of an empty pane when the saved chat target is gone."
+        )
+    }
+
+    func testCodexAgentClosesPartiallyOpenedDatabaseHandleOnOpenFailure() throws {
+        let repoRoot = repoRootURL()
+        let codexFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Agent/CodexAgent.swift"
+        )
+        let content = try String(contentsOf: codexFile, encoding: .utf8)
+
+        XCTAssertTrue(
+            content.contains("let openResult = sqlite3_open_v2"),
+            "CodexAgent should capture the sqlite open result before deciding whether the handle must be closed."
+        )
+        XCTAssertTrue(
+            content.contains("if let database {\n                sqlite3_close(database)\n            }"),
+            "CodexAgent should close any partially initialized sqlite handle before returning from an open failure."
         )
     }
 

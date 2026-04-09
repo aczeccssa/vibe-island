@@ -106,15 +106,21 @@ actor ProjectionBootstrap {
         let runtimeIdentity = event.legacyRuntimeIdentity
             ?? RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .unknown)
         let now = Date()
-        let isInTmux = determineTmuxState(pid: event.pid, tty: event.tty)
-        var metadata = runtimeMetadataBySessionID[event.sessionId]
+        let normalizedTTY = event.tty?.replacingOccurrences(of: "/dev/", with: "")
+        let existingMetadata = runtimeMetadataBySessionID[event.sessionId]
+        let isInTmux = resolvedTmuxState(
+            pid: event.pid ?? existingMetadata?.pid,
+            tty: normalizedTTY ?? existingMetadata?.tty,
+            existing: existingMetadata
+        )
+        var metadata = existingMetadata
             ?? ProjectionRuntimeMetadata(
                 sessionID: event.sessionId,
                 agentID: event.agentId,
                 runtimeIdentity: runtimeIdentity,
                 cwd: event.cwd,
                 pid: event.pid,
-                tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
+                tty: normalizedTTY,
                 isInTmux: isInTmux,
                 phase: .idle,
                 activePrompt: nil,
@@ -126,7 +132,7 @@ actor ProjectionBootstrap {
         metadata.runtimeIdentity = runtimeIdentity
         metadata.cwd = event.cwd
         metadata.pid = event.pid ?? metadata.pid
-        metadata.tty = event.tty?.replacingOccurrences(of: "/dev/", with: "") ?? metadata.tty
+        metadata.tty = normalizedTTY ?? metadata.tty
         metadata.isInTmux = isInTmux || metadata.isInTmux
         metadata.lastActivity = now
 
@@ -177,16 +183,22 @@ actor ProjectionBootstrap {
 
         let runtimeIdentity = RuntimeIdentity.fromLegacyAgentID(agentID)
             ?? RuntimeIdentity(adapterID: .codexCLI, familyID: .codex, modeHint: .unknown)
-        let isInTmux = determineTmuxState(pid: pid, tty: tty)
+        let normalizedTTY = tty?.replacingOccurrences(of: "/dev/", with: "")
+        let existingMetadata = runtimeMetadataBySessionID[sessionID]
+        let isInTmux = resolvedTmuxState(
+            pid: pid ?? existingMetadata?.pid,
+            tty: normalizedTTY ?? existingMetadata?.tty,
+            existing: existingMetadata
+        )
         let now = Date()
-        var metadata = runtimeMetadataBySessionID[sessionID]
+        var metadata = existingMetadata
             ?? ProjectionRuntimeMetadata(
                 sessionID: sessionID,
                 agentID: agentID,
                 runtimeIdentity: runtimeIdentity,
                 cwd: cwd,
                 pid: pid,
-                tty: tty?.replacingOccurrences(of: "/dev/", with: ""),
+                tty: normalizedTTY,
                 isInTmux: isInTmux,
                 phase: .processing,
                 activePrompt: nil,
@@ -198,7 +210,7 @@ actor ProjectionBootstrap {
         metadata.runtimeIdentity = runtimeIdentity
         metadata.cwd = cwd
         metadata.pid = pid ?? metadata.pid
-        metadata.tty = tty?.replacingOccurrences(of: "/dev/", with: "") ?? metadata.tty
+        metadata.tty = normalizedTTY ?? metadata.tty
         metadata.isInTmux = isInTmux || metadata.isInTmux
         if metadata.phase == .idle {
             metadata.phase = .processing
@@ -403,6 +415,10 @@ actor ProjectionBootstrap {
             )
 
             capabilities = fixture.snapshot.capabilities
+            cachedUISessionsByID = buildUISessions(
+                snapshot: fixture.snapshot,
+                hiddenSessionIDs: suppressedSessionIDs
+            )
             await projectionStore.replaceSnapshot(fixture.snapshot)
 
             switch initialContent {
@@ -411,11 +427,6 @@ actor ProjectionBootstrap {
             case .chat(let sessionID):
                 fixtureBootSessionIDValue = sessionID
             }
-
-            cachedUISessionsByID = buildUISessions(
-                snapshot: fixture.snapshot,
-                hiddenSessionIDs: suppressedSessionIDs
-            )
             let compatibility = CompatibilityStateProjector.project(fixture.snapshot)
             ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
         } catch {
@@ -458,11 +469,11 @@ actor ProjectionBootstrap {
             previousConversations: previousSnapshot.conversations,
             archivedSessionIDs: suppressedSessionIDs
         )
-        await projectionStore.replaceSnapshot(snapshot)
         cachedUISessionsByID = buildUISessions(
             snapshot: snapshot,
             hiddenSessionIDs: suppressedSessionIDs
         )
+        await projectionStore.replaceSnapshot(snapshot)
         let compatibility = CompatibilityStateProjector.project(snapshot)
         ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
     }
@@ -641,6 +652,19 @@ actor ProjectionBootstrap {
             return ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
         }
         return tty != nil
+    }
+
+    func resolvedTmuxState(
+        pid: Int?,
+        tty: String?,
+        existing: ProjectionRuntimeMetadata?
+    ) -> Bool {
+        if let existing,
+           existing.pid == pid,
+           existing.tty == tty {
+            return existing.isInTmux
+        }
+        return determineTmuxState(pid: pid, tty: tty)
     }
 }
 

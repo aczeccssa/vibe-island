@@ -501,6 +501,53 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertEqual(sessions.first?.tty, "ttys009")
     }
 
+    func testProjectionBootstrapProcessDetectionPreservesCodexAppIdentity() async {
+        await ProjectionBootstrap.shared.stop()
+        await ProjectionBootstrap.shared.start(mode: .live)
+
+        await ProjectionBootstrap.shared.handleProcessDetected(
+            sessionID: "codex-app-session",
+            cwd: "/tmp/codex-app-session",
+            agentID: "codex-app",
+            pid: 42,
+            tty: nil
+        )
+
+        let snapshot = await ProjectionBootstrap.shared.projectionStore.snapshot()
+        let session = await ProjectionBootstrap.shared.uiSession(id: "codex-app-session")
+
+        XCTAssertEqual(snapshot.conversations["codex-app-session"]?.adapterID, .codexApp)
+        XCTAssertEqual(snapshot.conversations["codex-app-session"]?.familyID, .codex)
+        XCTAssertEqual(session?.adapterID, .codexApp)
+        XCTAssertEqual(session?.agentID, "codex-app")
+
+        await ProjectionBootstrap.shared.stop()
+    }
+
+    func testProjectionBootstrapResolvedTmuxStateReusesStableSessionIdentity() async {
+        let metadata = ProjectionRuntimeMetadata(
+            sessionID: "tmux-stable",
+            agentID: "claude",
+            runtimeIdentity: RuntimeIdentity(adapterID: .claudeCode, familyID: .claude, modeHint: .cli),
+            cwd: "/tmp/tmux-stable",
+            pid: 123,
+            tty: "ttys001",
+            isInTmux: true,
+            phase: .processing,
+            activePrompt: nil,
+            lastActivity: CanonicalFixtures.baseDate,
+            createdAt: CanonicalFixtures.baseDate
+        )
+
+        let state = await ProjectionBootstrap.shared.resolvedTmuxState(
+            pid: 123,
+            tty: "ttys001",
+            existing: metadata
+        )
+
+        XCTAssertTrue(state)
+    }
+
     func testCompatibilityProjectorUsesToolOrInteractionIDsAndBinaryPendingCount() async {
         let snapshot = SessionProjectionSnapshot(
             conversations: [

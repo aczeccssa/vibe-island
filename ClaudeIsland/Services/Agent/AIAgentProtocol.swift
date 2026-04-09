@@ -1552,7 +1552,7 @@ struct CodexAppRuntimeAdapter: RuntimeAdapter, RuntimeObservationPlane, RuntimeR
         RuntimeAdapterDescriptor(
             adapterID: .codexApp,
             familyID: .codex,
-            legacyAgentID: nil,
+            legacyAgentID: "codex-app",
             displayName: "OpenAI Codex App",
             shortDisplayName: "Codex App",
             priority: rawAgent.priority + 1,
@@ -1601,7 +1601,7 @@ struct CodexAppRuntimeAdapter: RuntimeAdapter, RuntimeObservationPlane, RuntimeR
             .map {
                 RuntimeDiscoveredSession(
                     adapterID: .codexApp,
-                    legacyAgentID: rawAgent.id,
+                    legacyAgentID: "codex-app",
                     sessionID: $0.sessionId,
                     cwd: $0.cwd,
                     pid: $0.pid,
