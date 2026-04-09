@@ -1464,7 +1464,7 @@ struct CodexCLIRuntimeAdapter: RuntimeAdapter, RuntimeObservationPlane, RuntimeR
                     sessionID: $0.sessionId,
                     cwd: $0.cwd,
                     pid: $0.pid,
-                    tty: nil
+                    tty: $0.tty
                 )
             }
     }

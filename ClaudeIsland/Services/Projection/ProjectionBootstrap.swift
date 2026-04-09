@@ -315,6 +315,37 @@ actor ProjectionBootstrap {
         await rebuildProjectionState()
     }
 
+    func applySyntheticInteractionResolution(_ event: CanonicalEventEnvelope) async {
+        await projectionStore.apply(event)
+
+        guard var metadata = runtimeMetadataBySessionID[event.conversation.id] else {
+            return
+        }
+
+        switch event.payload {
+        case .approvalResolved(let payload):
+            if metadata.activePrompt?.kind == .approval,
+               metadata.activePrompt?.id == payload.approval.id {
+                metadata.activePrompt = nil
+            }
+        case .userChoiceResolved(let payload):
+            if metadata.activePrompt?.kind == .choice,
+               metadata.activePrompt?.id == payload.choice.id {
+                metadata.activePrompt = nil
+            }
+        default:
+            return
+        }
+
+        let snapshot = await projectionStore.snapshot()
+        metadata.phase = ProjectionRuntimeBuilder.runtimePhase(
+            from: snapshot.conversations[event.conversation.id],
+            activePrompt: metadata.activePrompt
+        )
+        runtimeMetadataBySessionID[event.conversation.id] = metadata
+        await rebuildProjectionState()
+    }
+
     private var activeModeStartsLiveIngress: Bool {
         startedMode?.startsLiveIngress == true
     }

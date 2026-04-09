@@ -452,6 +452,55 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
     }
 
+    func testRuntimeCutoverCanonicalProjectionFlagAlonePreservesAllAdapters() {
+        let flags = EventBusFeatureFlags(
+            environment: [
+                "VIBE_ISLAND_ENABLE_CANONICAL_PROJECTION_PATH": "true"
+            ],
+            defaults: UserDefaults(suiteName: #function)!
+        )
+        let configuration = RuntimeOrchestrator.liveCutoverConfiguration(for: .live, flags: flags)
+
+        XCTAssertEqual(configuration.activeAdapterIDs, Set(RuntimeAdapterID.allCases))
+        XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
+    }
+
+    func testCodexDetectRunningSessionsPreservesTTYForCLIProcesses() {
+        let agent = CodexAgent()
+        let output = """
+          PID COMM WCHAN
+          101 codex - 
+        """
+        let processTree = [
+            101: ProcessInfo(pid: 101, ppid: 1, command: "codex", tty: "ttys009")
+        ]
+
+        let sessions = agent.parseRunningSessions(
+            from: output,
+            processTree: processTree,
+            executablePathForPID: { pid in
+                switch pid {
+                case 101:
+                    return "/Users/test/.codex/bin/codex"
+                default:
+                    return nil
+                }
+            },
+            workingDirectoryForPID: { pid in
+                switch pid {
+                case 101:
+                    return "/tmp/codex-cli"
+                default:
+                    return nil
+                }
+            }
+        )
+
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertEqual(sessions.first?.variant, .cli)
+        XCTAssertEqual(sessions.first?.tty, "ttys009")
+    }
+
     func testCompatibilityProjectorUsesToolOrInteractionIDsAndBinaryPendingCount() async {
         let snapshot = SessionProjectionSnapshot(
             conversations: [

@@ -516,6 +516,55 @@ final class ArchitectureInvariantTests: XCTestCase {
         XCTAssertEqual(secondSnapshot.conversations["timeout-approval"]?.approvals.count, 1)
     }
 
+    func testRuntimeOrchestratorApprovalTimeoutClearsProjectedPromptState() async {
+        await ProjectionBootstrap.shared.stop()
+        await ProjectionBootstrap.shared.start(mode: .live)
+
+        await ProjectionBootstrap.shared.handleHookEvent(
+            HookEvent(
+                sessionId: "timeout-approval-ui",
+                cwd: "/tmp/timeout-approval-ui",
+                event: HookEventType.permissionRequest.rawValue,
+                status: "waiting_for_approval",
+                pid: nil,
+                tty: nil,
+                tool: "Bash",
+                toolInput: nil,
+                toolUseId: "approval-timeout-ui-1",
+                notificationType: nil,
+                message: "approval timeout",
+                agentId: "claude"
+            )
+        )
+
+        let pendingSession = await ProjectionBootstrap.shared.uiSession(id: "timeout-approval-ui")
+        XCTAssertEqual(pendingSession?.prompt?.id, "approval-timeout-ui-1")
+        XCTAssertEqual(pendingSession?.pendingInteractionCount, 1)
+        XCTAssertEqual(pendingSession?.phase, .waitingForApproval)
+
+        await RuntimeOrchestrator.shared.registerManagedInteraction(
+            RuntimeManagedInteraction(
+                kind: .approval,
+                adapterID: .claudeCode,
+                conversationID: "timeout-approval-ui",
+                interactionID: "approval-timeout-ui-1",
+                observedAt: Date(),
+                reason: "approval timeout"
+            ),
+            timeoutOverride: 0.01
+        )
+
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let resolvedSession = await ProjectionBootstrap.shared.uiSession(id: "timeout-approval-ui")
+
+        XCTAssertNil(resolvedSession?.prompt)
+        XCTAssertEqual(resolvedSession?.pendingInteractionCount, 0)
+        XCTAssertEqual(resolvedSession?.phase, .processing)
+
+        await ProjectionBootstrap.shared.stop()
+    }
+
     func testRuntimeOrchestratorCancelsTimeoutAfterResolution() async {
         await ProjectionBootstrap.shared.projectionStore.reset()
 

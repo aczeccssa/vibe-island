@@ -317,7 +317,7 @@ actor RuntimeOrchestrator {
                 "Failed to publish expired interaction event for \(interaction.conversationID, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
         }
-        await ProjectionBootstrap.shared.projectionStore.apply(event)
+        await ProjectionBootstrap.shared.applySyntheticInteractionResolution(event)
     }
 
     private func makeExpiredEvent(for interaction: RuntimeManagedInteraction) async -> CanonicalEventEnvelope? {
@@ -452,9 +452,10 @@ actor RuntimeOrchestrator {
                 isEnabled ? adapterID : nil
             }
         )
+        let activeAdapters = enabledAdapters.isEmpty ? Set(RuntimeAdapterID.allCases) : enabledAdapters
 
         return RuntimeCutoverConfiguration(
-            activeAdapterIDs: enabledAdapters,
+            activeAdapterIDs: activeAdapters,
             enablesCanonicalProjectionLiveIngress: flags.enableCanonicalProjectionPath
         )
     }

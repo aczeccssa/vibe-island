@@ -631,12 +631,17 @@ struct CodexAgent: HookInstallableAgent {
         case unknown
     }
 
-    /// Detect running Codex sessions via process tree analysis
-    /// Returns array of (pid, cwd, sessionId, variant) tuples
-    func detectRunningSessions() -> [(pid: Int, cwd: String, sessionId: String, variant: CodexVariant)] {
-        var results: [(pid: Int, cwd: String, sessionId: String, variant: CodexVariant)] = []
-        var seenSessionIds = Set<String>()
+    struct DetectedSession: Equatable, Sendable {
+        let pid: Int
+        let cwd: String
+        let sessionId: String
+        let variant: CodexVariant
+        let tty: String?
+    }
 
+    /// Detect running Codex sessions via process tree analysis
+    /// Returns discovered sessions with enough terminal metadata to service ambient controls.
+    func detectRunningSessions() -> [DetectedSession] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/ps")
         task.arguments = ["-axo", "pid,comm,wchan"]
@@ -650,39 +655,58 @@ struct CodexAgent: HookInstallableAgent {
             task.waitUntilExit()
 
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let output = String(data: data, encoding: .utf8) else { return results }
+            guard let output = String(data: data, encoding: .utf8) else { return [] }
+            let processTree = ProcessTreeBuilder.shared.buildTree()
+            return parseRunningSessions(
+                from: output,
+                processTree: processTree,
+                executablePathForPID: { ProcessTreeBuilder.shared.getExecutablePath(forPid: $0) },
+                workingDirectoryForPID: { ProcessTreeBuilder.shared.getWorkingDirectory(forPid: $0) }
+            )
+        } catch {
+            // Silently fail
+            return []
+        }
+    }
 
-            let lines = output.components(separatedBy: .newlines)
+    func parseRunningSessions(
+        from output: String,
+        processTree: [Int: ProcessInfo],
+        executablePathForPID: (Int) -> String?,
+        workingDirectoryForPID: (Int) -> String?
+    ) -> [DetectedSession] {
+        var results: [DetectedSession] = []
+        var seenSessionIds = Set<String>()
 
-            for line in lines {
-                let components = line.trimmingCharacters(in: .whitespaces)
-                    .components(separatedBy: .whitespaces)
-                    .filter { !$0.isEmpty }
+        for line in output.components(separatedBy: .newlines) {
+            let components = line.trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: .whitespaces)
+                .filter { !$0.isEmpty }
 
-                guard components.count >= 2 else { continue }
+            guard components.count >= 2 else { continue }
 
-                let comm = components[1]
-                guard let pid = Int(components[0]) else { continue }
+            let comm = components[1]
+            guard let pid = Int(components[0]) else { continue }
 
-                let executablePath = ProcessTreeBuilder.shared.getExecutablePath(forPid: pid)
-                guard Self.looksLikeCodexProcess(command: comm, executablePath: executablePath) else {
-                    continue
-                }
+            let executablePath = executablePathForPID(pid)
+            guard Self.looksLikeCodexProcess(command: comm, executablePath: executablePath) else {
+                continue
+            }
 
-                let cwd = ProcessTreeBuilder.shared.getWorkingDirectory(forPid: pid) ?? ""
-                let sessionId = resolveSessionId(cwd: cwd) ?? "codex-pid-\(pid)"
-                guard seenSessionIds.insert(sessionId).inserted else { continue }
+            let cwd = workingDirectoryForPID(pid) ?? ""
+            let sessionId = resolveSessionId(cwd: cwd) ?? "codex-pid-\(pid)"
+            guard seenSessionIds.insert(sessionId).inserted else { continue }
 
-                let variant = Self.detectCodexVariant(pid: pid, command: comm, executablePath: executablePath)
-                results.append((
+            let variant = Self.detectCodexVariant(pid: pid, command: comm, executablePath: executablePath)
+            results.append(
+                DetectedSession(
                     pid: pid,
                     cwd: cwd,
                     sessionId: sessionId,
-                    variant: variant
-                ))
-            }
-        } catch {
-            // Silently fail
+                    variant: variant,
+                    tty: processTree[pid]?.tty
+                )
+            )
         }
 
         return results
