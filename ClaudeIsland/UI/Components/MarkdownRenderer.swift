@@ -53,18 +53,21 @@ struct MarkdownText: View {
 
     var body: some View {
         let children = Array(document.children)
-        if children.isEmpty {
-            // Fallback for empty parse result
-            SwiftUI.Text(text)
-                .foregroundColor(baseColor)
-                .font(.system(size: fontSize))
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                ForEach(Array(children.enumerated()), id: \.offset) { _, child in
-                    BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
+        Group {
+            if children.isEmpty {
+                // Fallback for empty parse result
+                SwiftUI.Text(text)
+                    .foregroundColor(baseColor)
+                    .font(.system(size: fontSize))
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(Array(children.enumerated()), id: \.offset) { _, child in
+                        BlockRenderer(markup: child, baseColor: baseColor, fontSize: fontSize)
+                    }
                 }
             }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 

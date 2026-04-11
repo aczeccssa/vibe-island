@@ -11,11 +11,7 @@ import os.log
 @MainActor
 struct HookInstaller {
     private static let logger = Logger(subsystem: "com.claudeisland", category: "HookInstaller")
-    private static let hookAgents: [any HookInstallableAgent] = [
-        ClaudeCodeAgent(),
-        CodexAgent(),
-        GeminiCLIAgent()
-    ]
+    private static let hookAgents = RuntimeAdapterCatalog.hookInstallableAgents()
 
     /// Install hook scripts and update hook settings for all supported agents.
     static func installIfNeeded() {

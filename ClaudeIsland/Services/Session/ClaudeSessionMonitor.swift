@@ -29,12 +29,16 @@ class ClaudeSessionMonitor: ObservableObject {
     @Published var pendingInstances: [ProjectedSessionViewState] = []
     @Published var hydratedSessionIDs: Set<String> = []
     @Published var fixtureBootSessionID: String?
+    @Published var isFixtureReady: Bool
+    @Published var fixtureLoadError: String?
     @Published var interactionSubmitErrors: [String: String] = [:]
     @Published var submittingInteractionSessionIds: Set<String> = []
 
     private var observationTask: Task<Void, Never>?
 
     init() {
+        isFixtureReady = !ProjectionLaunchMode.current.isFixture
+        fixtureLoadError = nil
         startObservingProjection()
         InterruptWatcherManager.shared.delegate = self
     }
@@ -202,12 +206,14 @@ class ClaudeSessionMonitor: ObservableObject {
             for await snapshot in stream {
                 if Task.isCancelled { break }
                 let sessions = await ProjectionBootstrap.shared.uiSessions()
-                let fixtureBootSessionID = await ProjectionBootstrap.shared.fixtureBootSessionID()
+                let fixturePresentationState = await ProjectionBootstrap.shared.fixturePresentationState()
                 await MainActor.run {
                     self.instances = sessions
                     self.pendingInstances = sessions.filter { $0.needsAttention }
                     self.hydratedSessionIDs = Set(snapshot.conversations.keys)
-                    self.fixtureBootSessionID = fixtureBootSessionID
+                    self.fixtureBootSessionID = fixturePresentationState?.bootSessionID
+                    self.isFixtureReady = fixturePresentationState?.isReady ?? !ProjectionLaunchMode.current.isFixture
+                    self.fixtureLoadError = fixturePresentationState?.errorMessage
                 }
             }
         }

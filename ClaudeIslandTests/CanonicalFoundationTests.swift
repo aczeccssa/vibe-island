@@ -465,6 +465,23 @@ final class CanonicalFoundationTests: XCTestCase {
         XCTAssertTrue(configuration.enablesCanonicalProjectionLiveIngress)
     }
 
+    func testRuntimeAdapterCatalogCoversAllAdaptersAndHookInstallables() {
+        let adapters = RuntimeAdapterCatalog.adapters()
+        let descriptors = RuntimeAdapterCatalog.descriptors()
+        let hookAgents = RuntimeAdapterCatalog.hookInstallableAgents()
+
+        XCTAssertEqual(Set(adapters.map { $0.descriptor.adapterID }), Set(RuntimeAdapterID.allCases))
+        XCTAssertEqual(Set(descriptors.map(\.adapterID)), Set(RuntimeAdapterID.allCases))
+        XCTAssertEqual(Set(hookAgents.map(\.id)), Set(["claude", "codex", "gemini"]))
+    }
+
+    func testHookInstallableAgentsValidateDeclaredHookContracts() throws {
+        for agent in RuntimeAdapterCatalog.hookInstallableAgents() {
+            XCTAssertNoThrow(try agent.validateHookContract(), "Hook contract mismatch for \(agent.id)")
+            XCTAssertEqual(agent.supportedEvents, agent.installedHookEvents())
+        }
+    }
+
     func testCodexDetectRunningSessionsPreservesTTYForCLIProcesses() {
         let agent = CodexAgent()
         let output = """
@@ -801,12 +818,46 @@ final class CanonicalFoundationTests: XCTestCase {
 
         let sessions = await ProjectionBootstrap.shared.uiSessions()
         let fixtureBootSessionID = await ProjectionBootstrap.shared.fixtureBootSessionID()
+        let fixturePresentationState = await ProjectionBootstrap.shared.fixturePresentationState()
 
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions.first?.sessionID, "conversation-fixture")
         XCTAssertEqual(sessions.first?.timeline.count, 2)
         XCTAssertEqual(sessions.first?.displayTitle, "Fixture Session")
         XCTAssertEqual(fixtureBootSessionID, "conversation-fixture")
+        XCTAssertEqual(fixturePresentationState?.bootSessionID, "conversation-fixture")
+        XCTAssertEqual(fixturePresentationState?.isReady, true)
+    }
+
+    func testProjectionBootstrapFixtureFailureMarksReadyWithError() async {
+        await ProjectionBootstrap.shared.stop()
+        defer {
+            Task {
+                await ProjectionBootstrap.shared.stop()
+            }
+        }
+
+        let missingFixturePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("json")
+            .path
+
+        await ProjectionBootstrap.shared.start(
+            mode: .projectedFixture(
+                .init(
+                    fixturePath: missingFixturePath,
+                    initialContent: .chat(sessionID: "missing-fixture")
+                )
+            )
+        )
+
+        let fixturePresentationState = await ProjectionBootstrap.shared.fixturePresentationState()
+        let sessions = await ProjectionBootstrap.shared.uiSessions()
+
+        XCTAssertEqual(fixturePresentationState?.bootSessionID, "missing-fixture")
+        XCTAssertEqual(fixturePresentationState?.isReady, true)
+        XCTAssertEqual(fixturePresentationState?.errorMessage, "Failed to load fixture.")
+        XCTAssertTrue(sessions.isEmpty)
     }
 
     func testProjectionBootstrapFixtureRegistersShadowParitySnapshot() async throws {

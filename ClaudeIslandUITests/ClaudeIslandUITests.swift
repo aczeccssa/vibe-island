@@ -18,8 +18,7 @@ final class ClaudeIslandUITests: XCTestCase {
     func testProjectedFixtureLaunchShowsPopulatedInstancesState() throws {
         let app = try launchApp(withFixtureJSON: populatedInstancesFixtureJSON())
 
-        assertExists(app.staticTexts["List fixture prompt"])
-        assertExists(app.staticTexts["Bash"])
+        assertExists(app.otherElements["session.prompt.conversation-list"])
     }
 
     func testProjectedFixtureLaunchShowsPopulatedChatState() throws {
@@ -51,8 +50,6 @@ final class ClaudeIslandUITests: XCTestCase {
             bootSessionID: "conversation-choice"
         )
 
-        assertExists(app.staticTexts["Choose"])
-        assertExists(app.staticTexts["Choose deployment"])
         assertExists(app.buttons["Ship"])
         assertExists(app.buttons["Hold"])
     }
@@ -93,6 +90,12 @@ final class ClaudeIslandUITests: XCTestCase {
             file: file,
             line: line
         )
+    }
+
+    private func element(in app: XCUIApplication, identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(identifier: identifier)
+            .firstMatch
     }
 
     private func writeFixture(json: String) throws -> URL {

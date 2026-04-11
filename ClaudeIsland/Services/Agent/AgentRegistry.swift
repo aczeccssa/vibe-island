@@ -37,15 +37,9 @@ final class AgentRegistry: ObservableObject {
     }
 
     private func registerDefaultDescriptors() {
-        let adapters: [any RuntimeAdapter] = [
-            ClaudeCodeRuntimeAdapter(),
-            CodexCLIRuntimeAdapter(),
-            CodexAppRuntimeAdapter(),
-            GeminiCLIRuntimeAdapter(),
-            OpencodeRuntimeAdapter()
-        ]
-
-        descriptors = Dictionary(uniqueKeysWithValues: adapters.map { ($0.descriptor.adapterID, $0.descriptor) })
+        descriptors = Dictionary(
+            uniqueKeysWithValues: RuntimeAdapterCatalog.descriptors().map { ($0.adapterID, $0) }
+        )
     }
 
     func descriptor(for adapterID: RuntimeAdapterID) -> RuntimeAdapterDescriptor? {

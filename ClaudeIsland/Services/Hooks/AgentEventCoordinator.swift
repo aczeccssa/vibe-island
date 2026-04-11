@@ -25,13 +25,7 @@ actor RuntimeOrchestrator {
     }
 
     private let commandRouter = CommandRouter()
-    private let adapters: [any RuntimeAdapter] = [
-        ClaudeCodeRuntimeAdapter(),
-        CodexCLIRuntimeAdapter(),
-        CodexAppRuntimeAdapter(),
-        GeminiCLIRuntimeAdapter(),
-        OpencodeRuntimeAdapter()
-    ]
+    private let adapters = RuntimeAdapterCatalog.adapters()
 
     private var startedMode: ProjectionLaunchMode?
     private var interactionTimeouts: [InteractionTimeoutKey: Task<Void, Never>] = [:]

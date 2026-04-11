@@ -285,6 +285,33 @@ final class ArchitectureInvariantTests: XCTestCase {
         XCTAssertFalse(content.contains("any HookInstallableAgent"))
     }
 
+    func testRuntimeAdapterCatalogIsSingleCompositionSource() throws {
+        let repoRoot = repoRootURL()
+        let protocolFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Agent/AIAgentProtocol.swift"
+        )
+        let orchestratorFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Hooks/AgentEventCoordinator.swift"
+        )
+        let registryFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Agent/AgentRegistry.swift"
+        )
+        let hookInstallerFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/Services/Hooks/HookInstaller.swift"
+        )
+
+        let protocolContent = try String(contentsOf: protocolFile, encoding: .utf8)
+        let orchestratorContent = try String(contentsOf: orchestratorFile, encoding: .utf8)
+        let registryContent = try String(contentsOf: registryFile, encoding: .utf8)
+        let hookInstallerContent = try String(contentsOf: hookInstallerFile, encoding: .utf8)
+
+        XCTAssertTrue(protocolContent.contains("enum RuntimeAdapterCatalog"))
+        XCTAssertTrue(protocolContent.contains("for adapter in RuntimeAdapterCatalog.adapters()"))
+        XCTAssertTrue(orchestratorContent.contains("RuntimeAdapterCatalog.adapters()"))
+        XCTAssertTrue(registryContent.contains("RuntimeAdapterCatalog.descriptors()"))
+        XCTAssertTrue(hookInstallerContent.contains("RuntimeAdapterCatalog.hookInstallableAgents()"))
+    }
+
     func testLegacyFrozenCoverageIncludesSessionStateAndSessionInteraction() throws {
         let repoRoot = repoRootURL()
         let legacyFiles = [
@@ -378,6 +405,19 @@ final class ArchitectureInvariantTests: XCTestCase {
             content.contains("AgentInstancesView("),
             "NotchView should render the instances list instead of an empty pane when the saved chat target is gone."
         )
+    }
+
+    func testFixtureWindowRootWaitsForFixtureReadinessBeforeShowingContent() throws {
+        let repoRoot = repoRootURL()
+        let controllerFile = repoRoot.appendingPathComponent(
+            "ClaudeIsland/UI/Window/NotchViewController.swift"
+        )
+        let content = try String(contentsOf: controllerFile, encoding: .utf8)
+
+        XCTAssertTrue(content.contains("if !sessionMonitor.isFixtureReady"))
+        XCTAssertTrue(content.contains("\"fixture.loading\""))
+        XCTAssertTrue(content.contains("\"fixture.chat.root\""))
+        XCTAssertTrue(content.contains("\"fixture.instances.root\""))
     }
 
     func testCodexAgentClosesPartiallyOpenedDatabaseHandleOnOpenFailure() throws {

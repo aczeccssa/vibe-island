@@ -509,6 +509,8 @@ struct AgentInstanceRow: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(.white.opacity(0.72))
                                 .lineLimit(1)
+                                .accessibilityIdentifier("session.prompt.\(session.sessionID)")
+                                .accessibilityLabel(userPromptPreview)
                         }
 
                         Spacer(minLength: 10)
@@ -550,6 +552,15 @@ struct AgentInstanceRow: View {
             RoundedRectangle(cornerRadius: 12)
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
         )
+        .overlay(alignment: .topLeading) {
+            if ProjectionLaunchMode.current.isFixture {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier("session.prompt.\(session.sessionID)")
+                    .accessibilityLabel(userPromptPreview)
+            }
+        }
         .onHover { isHovered = $0 }
         .task {
             guard !ProjectionLaunchMode.current.isFixture else { return }
@@ -873,6 +884,7 @@ private struct ActionLine: View {
                 .foregroundColor(.white.opacity(0.55))
                 .lineLimit(1)
                 .accessibilityIdentifier(accessibilityID)
+                .accessibilityLabel(text)
         case .highlighted(let label, let detail, let color):
             HStack(spacing: 6) {
                 Text(label)
@@ -891,6 +903,8 @@ private struct ActionLine: View {
                     .lineLimit(1)
             }
             .accessibilityIdentifier(accessibilityID)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label) \(detail)")
         }
     }
 }

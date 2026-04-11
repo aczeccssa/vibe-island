@@ -852,16 +852,8 @@ private struct RuntimeUnavailableDiscoveryPlane: RuntimeSessionDiscoveryPlane {
 
 enum RuntimeSemanticRegistry {
     private static let planes: [RuntimeAdapterID: any RuntimeSemanticPlane] = {
-        let adapters: [any RuntimeAdapter] = [
-            ClaudeCodeRuntimeAdapter(),
-            CodexCLIRuntimeAdapter(),
-            CodexAppRuntimeAdapter(),
-            GeminiCLIRuntimeAdapter(),
-            OpencodeRuntimeAdapter()
-        ]
-
         var planesByID: [RuntimeAdapterID: any RuntimeSemanticPlane] = [:]
-        for adapter in adapters {
+        for adapter in RuntimeAdapterCatalog.adapters() {
             let planes = adapter.makePlanes()
             planesByID[adapter.descriptor.adapterID] = planes.semantic
         }
@@ -870,6 +862,30 @@ enum RuntimeSemanticRegistry {
 
     static func semanticPlane(for adapterID: RuntimeAdapterID) -> (any RuntimeSemanticPlane)? {
         planes[adapterID]
+    }
+}
+
+enum RuntimeAdapterCatalog {
+    static func adapters() -> [any RuntimeAdapter] {
+        [
+            ClaudeCodeRuntimeAdapter(),
+            CodexCLIRuntimeAdapter(),
+            CodexAppRuntimeAdapter(),
+            GeminiCLIRuntimeAdapter(),
+            OpencodeRuntimeAdapter()
+        ]
+    }
+
+    static func descriptors() -> [RuntimeAdapterDescriptor] {
+        adapters().map(\.descriptor)
+    }
+
+    static func hookInstallableAgents() -> [any HookInstallableAgent] {
+        [
+            ClaudeCodeAgent(),
+            CodexAgent(),
+            GeminiCLIAgent()
+        ]
     }
 }
 

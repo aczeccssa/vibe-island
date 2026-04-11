@@ -104,20 +104,26 @@ private struct FixtureWindowRootView: View {
 
     var body: some View {
         Group {
-            if let explicitChatSession = explicitChatSession {
+            if !sessionMonitor.isFixtureReady {
+                FixtureLoadingView()
+                    .accessibilityIdentifier("fixture.loading")
+            } else if let error = sessionMonitor.fixtureLoadError {
+                FixtureErrorView(message: error)
+                    .accessibilityIdentifier("fixture.error")
+            } else if let explicitChatSession = explicitChatSession {
                 ChatView(
                     sessionId: explicitChatSession.sessionID,
                     initialSession: explicitChatSession,
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel
                 )
-                .accessibilityIdentifier("chat.view")
+                .accessibilityIdentifier("fixture.chat.root")
             } else {
                 AgentInstancesView(
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel
                 )
-                .accessibilityIdentifier("instances.view")
+                .accessibilityIdentifier("fixture.instances.root")
             }
         }
         .frame(width: viewModel.openedSize.width, height: viewModel.openedSize.height)
@@ -139,5 +145,39 @@ private struct FixtureWindowRootView: View {
             return nil
         }
         return sessionMonitor.instances.first(where: { $0.sessionID == sessionID })
+    }
+}
+
+private struct FixtureLoadingView: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .progressViewStyle(.circular)
+            Text("Loading fixture...")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct FixtureErrorView: View {
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 20))
+                .foregroundColor(.orange)
+            Text("Fixture failed to load")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.65))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 16)
     }
 }

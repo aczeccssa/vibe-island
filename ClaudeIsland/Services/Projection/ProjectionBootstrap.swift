@@ -46,6 +46,24 @@ struct ProjectionRuntimeMetadata: Equatable, Sendable {
     let createdAt: Date
 }
 
+struct ProjectionFixturePresentationState: Equatable, Sendable {
+    let initialContent: ProjectionLaunchMode.ProjectionFixtureLaunchConfiguration.InitialContent
+    let bootSessionID: String?
+    let isReady: Bool
+    let errorMessage: String?
+}
+
+private extension ProjectionLaunchMode.ProjectionFixtureLaunchConfiguration.InitialContent {
+    var bootSessionID: String? {
+        switch self {
+        case .instances:
+            return nil
+        case .chat(let sessionID):
+            return sessionID
+        }
+    }
+}
+
 private struct ProjectionHydratedArtifacts: Sendable {
     let conversationInfo: ConversationInfo
     let timeline: [ProjectedTimelineItemState]
@@ -68,7 +86,7 @@ actor ProjectionBootstrap {
     private var capabilities: [RuntimeAdapterID: [CanonicalSemanticArea: AdapterCapabilitySnapshot]] = [:]
     private var suppressedSessionIDs: Set<String> = []
     private var clearedAtBySessionID: [String: Date] = [:]
-    private var fixtureBootSessionIDValue: String?
+    private var fixturePresentationStateValue: ProjectionFixturePresentationState?
 
     private init() {}
 
@@ -78,8 +96,15 @@ actor ProjectionBootstrap {
 
         switch mode {
         case .live:
+            fixturePresentationStateValue = nil
             await rebuildProjectionState()
         case .projectedFixture(let configuration):
+            fixturePresentationStateValue = ProjectionFixturePresentationState(
+                initialContent: configuration.initialContent,
+                bootSessionID: configuration.initialContent.bootSessionID,
+                isReady: false,
+                errorMessage: nil
+            )
             await loadFixture(
                 at: configuration.fixturePath,
                 initialContent: configuration.initialContent
@@ -95,7 +120,7 @@ actor ProjectionBootstrap {
         capabilities.removeAll()
         suppressedSessionIDs.removeAll()
         clearedAtBySessionID.removeAll()
-        fixtureBootSessionIDValue = nil
+        fixturePresentationStateValue = nil
         await projectionStore.reset()
         ShadowDiffLogger.updateProjectedSnapshot(nil)
     }
@@ -290,7 +315,11 @@ actor ProjectionBootstrap {
     }
 
     func fixtureBootSessionID() -> String? {
-        fixtureBootSessionIDValue
+        fixturePresentationStateValue?.bootSessionID
+    }
+
+    func fixturePresentationState() -> ProjectionFixturePresentationState? {
+        fixturePresentationStateValue
     }
 
     func applyCommandDispatch(
@@ -419,14 +448,14 @@ actor ProjectionBootstrap {
                 snapshot: fixture.snapshot,
                 hiddenSessionIDs: suppressedSessionIDs
             )
+            fixturePresentationStateValue = ProjectionFixturePresentationState(
+                initialContent: initialContent,
+                bootSessionID: initialContent.bootSessionID,
+                isReady: true,
+                errorMessage: nil
+            )
             await projectionStore.replaceSnapshot(fixture.snapshot)
 
-            switch initialContent {
-            case .instances:
-                fixtureBootSessionIDValue = nil
-            case .chat(let sessionID):
-                fixtureBootSessionIDValue = sessionID
-            }
             let compatibility = CompatibilityStateProjector.project(fixture.snapshot)
             ShadowDiffLogger.updateProjectedSnapshot(compatibility.paritySnapshot)
         } catch {
@@ -434,7 +463,12 @@ actor ProjectionBootstrap {
             artifactsBySessionID.removeAll()
             cachedUISessionsByID.removeAll()
             capabilities.removeAll()
-            fixtureBootSessionIDValue = nil
+            fixturePresentationStateValue = ProjectionFixturePresentationState(
+                initialContent: initialContent,
+                bootSessionID: initialContent.bootSessionID,
+                isReady: true,
+                errorMessage: "Failed to load fixture."
+            )
             await projectionStore.reset()
             ShadowDiffLogger.updateProjectedSnapshot(nil)
         }
